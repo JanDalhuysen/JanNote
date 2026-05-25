@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>JanNote</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+        <link rel="stylesheet" href="styles.css" />
+    </head>
+    <body>
+        <div class="background">
+            <!-- <div class="blob blob-a"></div> -->
+            <!-- <div class="blob blob-b"></div> -->
+            <div class="grid"></div>
+        </div>
+
+        <main class="app-shell">
+            <section class="hero">
+                <!-- <div>
+                    <p class="eyebrow">ink replay</p>
+                    <h1>Draw one character at a time, then replay the ink.</h1>
+                    <p class="lede">
+                        A minimal stylus-friendly prototype with stroke replay and writing-speed stats. It is
+                        intentionally basic so you can extend it toward a OneNote-style experience. of and a for on by
+                        you or be are from as your all have new more an was we home can us
+                    </p>
+                </div> -->
+
+                <div class="hero-card">
+                    <!-- <label for="strokeLabel">Current character or word</label> -->
+                    <label for="strokeLabel">l</label>
+                    <input id="strokeLabel" type="text" maxlength="24" />
+                    <!-- placeholder="Type what you're about to draw" /> -->
+                    <!-- <p class="hint">Enter a label before drawing. Leave it blank if you only want to capture ink.</p> -->
+                </div>
+            </section>
+
+            <section class="workspace">
+                <div class="toolbar">
+                    <div class="mode-toggle">
+                        <button id="drawModeBtn" class="mode-btn active">Draw Mode</button>
+                        <button id="labelModeBtn" class="mode-btn">Label Mode</button>
+                    </div>
+
+                    <div class="vertical-divider"></div>
+
+                    <!-- Draw Mode Controls -->
+                    <div id="drawControls" class="control-group">
+                        <button id="clearBtn" class="secondary">Clear</button>
+                        <button id="replayBtn" class="primary" disabled>Replay</button>
+                        <button id="pauseBtn" class="secondary" disabled>Pause</button>
+
+                        <label class="speed-control">
+                            Replay speed
+                            <input id="speedRange" type="range" min="0.5" max="3" step="0.1" value="1" />
+                            <span id="speedValue">1.0x</span>
+                        </label>
+
+                        <div class="vertical-divider mini"></div>
+
+                        <label class="predict-toggle">
+                            <input id="predictCheckbox" type="checkbox" checked />
+                            <span>Auto-Predict</span>
+                        </label>
+                    </div>
+
+                    <!-- Label Mode Controls -->
+                    <div id="labelControls" class="control-group hidden">
+                        <div class="label-input-wrapper">
+                            <label for="activeLabel">Active Label:</label>
+                            <input id="activeLabel" type="text" maxlength="4" value="a" placeholder="a" />
+                        </div>
+
+                        <div class="quick-labels">
+                            <button class="quick-label-btn active">a</button>
+                            <button class="quick-label-btn">b</button>
+                            <button class="quick-label-btn">c</button>
+                            <button class="quick-label-btn">d</button>
+                            <button class="quick-label-btn">e</button>
+                        </div>
+
+                        <input type="file" id="importDatasetFile" accept=".json" style="display: none" />
+                        <button id="importDatasetBtn" class="secondary">Import Dataset</button>
+                        <button id="exportDatasetBtn" class="primary">Export Dataset</button>
+                        <button id="clearLabelsBtn" class="secondary">Clear Labels</button>
+                    </div>
+                </div>
+
+                <div class="canvas-card">
+                    <canvas id="inkCanvas" aria-label="Ink drawing canvas"></canvas>
+                    <div class="canvas-overlay">
+                        <div>
+                            <strong id="statusText">Ready to draw</strong>
+                            <span id="sessionText">0 strokes</span>
+                        </div>
+                        <div class="overlay-tip" id="canvasTip">Use a pen, stylus, mouse, or touch input.</div>
+                    </div>
+                </div>
+
+                <aside class="stats-panel">
+                    <!-- Drawing Stats -->
+                    <div id="drawingStats" class="stats-group">
+                        <!-- Prediction Card (Hidden until model loads) -->
+                        <div id="predictionCard" class="stat prediction-stat">
+                            <span>Prediction</span>
+                            <div class="prediction-value-wrapper">
+                                <strong id="predictionText">-</strong>
+                                <span id="predictionConfidenceText" class="subtext">0%</span>
+                            </div>
+                            <div class="progress-bar-wrapper">
+                                <div id="predictionConfidenceBar" class="progress-bar" style="width: 0%"></div>
+                            </div>
+                        </div>
+
+                        <div class="stat">
+                            <span>Characters</span>
+                            <strong id="charCount">0</strong>
+                        </div>
+                        <div class="stat">
+                            <span>Words</span>
+                            <strong id="wordCount">0</strong>
+                        </div>
+                        <div class="stat">
+                            <span>Chars / min</span>
+                            <strong id="cpmValue">0.0</strong>
+                        </div>
+                        <div class="stat">
+                            <span>Words / min</span>
+                            <strong id="wpmValue">0.0</strong>
+                        </div>
+                        <div class="stat">
+                            <span>Elapsed</span>
+                            <strong id="elapsedValue">0.0s</strong>
+                        </div>
+                    </div>
+
+                    <!-- Dataset Stats (Label Mode) -->
+                    <div id="datasetStats" class="stats-group hidden">
+                        <div class="stat">
+                            <span>Labeled Strokes</span>
+                            <strong id="labeledCount">0 / 0</strong>
+                        </div>
+                        <div class="stat">
+                            <span>Breakdown</span>
+                            <div id="samplesBreakdown" class="breakdown-list">
+                                <span class="breakdown-empty">No labels applied yet. Click strokes to label.</span>
+                            </div>
+                        </div>
+                        <div class="label-instruction-card">
+                            <h4>Keyboard Hotkeys</h4>
+                            <p>Press any letter or number key to instantly change the active label!</p>
+                        </div>
+                    </div>
+                </aside>
+            </section>
+            <!-- Recognized Text & Words -->
+            <div id="recognizedWordsPanel" class="stats-group">
+                <div class="stat recognized-text-stat">
+                    <span>Recognized Text</span>
+                    <div id="reconstructedSentence" class="sentence-box">
+                        <span class="text-empty">Start drawing to see text...</span>
+                    </div>
+                </div>
+                <div class="stat recognized-breakdown-stat">
+                    <span>Word Grouping Breakdown</span>
+                    <div id="wordBreakdownList" class="breakdown-list-words">
+                        <span class="breakdown-empty">No words grouped yet.</span>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <script src="app.js"></script>
+    </body>
+</html>
