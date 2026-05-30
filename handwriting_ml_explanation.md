@@ -2,96 +2,131 @@
 
 ## 1. Sequence-Based vs. Image-Based Machine Learning
 
-Most handwriting recognition models (like the famous MNIST digit classifier) are **Image-Based (Offline)**. They take a static 2D
-grid of pixels (an image), and use Convolutional Neural Networks (CNNs) to recognize shapes.
+Most handwriting recognition models (like MNIST-style classifiers) are **Image-Based (Offline)**. They take static pixel grids and
+use CNNs to recognize shapes.
 
-Our program uses **Sequence-Based (Online) Recognition**. Instead of rendering your drawing to a picture, it processes the raw
-coordinates of your pen path as a time-series sequence:
+Our program uses **Sequence-Based (Online) Recognition**. Instead of rendering strokes to an image, it processes raw pen path
+coordinates as a time-series sequence.
 
-$$X = [p_1, p_2, p_3, \dots, p_N]$$
+Each point is represented as:
 
-Where each point $p_i$ is represented as:
-
-$$p_i = [x_i, y_i, \text{pen\_lift}_i]$$
+`[x, y, pen_lift, delta_time, vx, vy]`
 
 ### The Features We Use:
 
-1. **$x$ coordinate**: Normalized horizontal position of the cursor/pen.
-2. **$y$ coordinate**: Normalized vertical position of the cursor/pen.
-3. **$\text{pen\_lift}$**: A binary marker ($0.0$ or $1.0$). It is set to $0.0$ while you are drawing a line, and $1.0$ at the end
-   of a stroke (when you lift the stylus or mouse button). This tells the model where one stroke ends and another begins (crucial
-   for multi-stroke letters like `t`, `i`, or `x`).
+1. **`x` coordinate**: Normalized horizontal position of the pen.
+2. **`y` coordinate**: Normalized vertical position of the pen.
+3. **`pen_lift`**: Binary marker (`0.0` or `1.0`) showing where a stroke ends.
+4. **`delta_time`**: Time elapsed (seconds) since the previous point.
+5. **`vx`**: Horizontal velocity.
+6. **`vy`**: Vertical velocity.
 
 ---
 
 ## 2. Normalization & Preprocessing
 
-Before feeding your drawing to the machine learning model, we must normalize the data so the model is not confused by different
-sizes or speeds:
+Before training or inference, the stroke data is normalized so the models are robust to drawing size and speed.
 
 ### A. Spatial Normalization (Scale Invariance)
 
-If you draw a small letter `a` in the corner of the canvas, or a giant `a` across the whole screen, they should look identical to
-the model.
+- Compute the stroke-group bounding box.
+- Rescale and center into a virtual `256 x 256` area.
+- Normalize coordinates into `[0.0, 1.0]`.
 
-- We calculate the bounding box of your drawing.
-- We rescale and center the drawing so it fits perfectly inside a virtual $256 \times 256$ coordinate space.
-- We divide by $256.0$ to project all coordinates into a clean $[0.0, 1.0]$ range.
+### B. Length Normalization (Fixed Input Sequences)
 
-### B. Length Normalization (Fixed Inputs)
+Models use fixed sequence lengths:
 
-An LSTM network expects input sequences of a fixed size. We chose a target sequence length of **128 points**:
+- Character model target length: **128** points
+- Sequence model target length: **192** points
 
-- **If you draw quickly** and capture fewer than 128 points (e.g., 50 points), we pad the end of the sequence with zeros
-  ($[0.0, 0.0, 0.0]$) up to 128.
-- **If you draw slowly** and capture more than 128 points (e.g., 400 points), we downsample the sequence uniformly, picking 128
-  points spaced evenly along your stroke.
+If a sample is shorter than target length, it is padded with zeros. If a sample is longer, it is uniformly downsampled.
 
 ---
 
-## 3. The LSTM Neural Network Architecture
+## 3. Character Model (Print / Isolated Letters)
 
-We use a **Long Short-Term Memory (LSTM)** network, which is a type of Recurrent Neural Network (RNN) designed for sequential
-data:
+This is the current model used by `/predict`.
 
+Training data source:
+
+- Dataset field: `samples`
+
+Architecture:
+
+```text
+[Input: 128 x 6] -> [LSTM(32, seq)] -> [LSTM(32)] -> [Dense(32, relu)] -> [Dropout(0.2)] -> [Softmax]
 ```
-[Input: 128 x 6] ──> [LSTM Layer (32 units)] ──> [Dropout (20%)] ──> [Dense Layer] ──> [Output: Character Probabilities]
-```
 
-- **Sequential Memory**: Unlike images where all pixels are processed at once, the LSTM reads the points one by one
-  ($p_1 \to p_2 \to p_3 \dots$). It maintains an internal "memory state" that tracks the direction and curvature of your pen
-  stroke.
-- **Temporal Patterns**: It learns that a circle drawn counter-clockwise represents an `o` or the bowl of an `a`, while a sharp
-  vertical line represents an `l` or `1`.
+Outputs:
+
+- `handwriting_model.keras`
+- `class_names.json`
+
+This model is excellent for print-style and isolated letter recognition.
 
 ---
 
-## 4. Are We Currently Using Time or Speed?
+## 4. Sequence Model for Connected Cursive Words
 
-**Yes, absolutely!**
+This is the current model used by `/predict-sequence`.
 
-Our pipeline now incorporates full temporal dynamics alongside the spatial coordinates. For every point $p_i$, the model receives
-a 6-dimensional feature vector:
+Training data source:
 
-$$p_i = [x_i, y_i, \text{pen\_lift}_i, \Delta t_i, v_{xi}, v_{yi}]$$
+- Dataset field: `sequenceSamples`
 
-### The Features We Use:
+Architecture:
 
-1. **$x$ coordinate**: Normalized horizontal position of the pen.
-2. **$y$ coordinate**: Normalized vertical position of the pen.
-3. **$\text{pen\_lift}$**: A binary marker ($0.0$ or $1.0$) indicating when a stroke is completed.
-4. **$\Delta t$ (Delta Time)**: The time elapsed (in seconds) between the current point and the previous point
-   ($\Delta t_i = t_i - t_{i-1}$).
-5. **$v_x$ (Horizontal Velocity)**: The velocity along the X-axis ($v_{xi} = \Delta x_i / \Delta t_i$).
-6. **$v_y$ (Vertical Velocity)**: The velocity along the Y-axis ($v_{yi} = \Delta y_i / \Delta t_i$).
+```text
+[Input: 192 x 6] -> [BiLSTM(64, seq)] -> [BiLSTM(64, seq)] -> [Dense(vocab + blank, softmax)] -> [CTC loss during training]
+```
 
-### Why This Made a Massive Difference:
+This model learns to decode full connected words without manually labeled per-letter boundaries.
 
-1. **Writing Rhythm (Velocity Cues)**: Humans write straight segments quickly, but slow down significantly when navigating sharp
-   corners or loops. By including velocity, the LSTM can easily tell the difference between a smooth curve (like the loop of an
-   `e`) and a sharp cusp (like the top loop of a `y`) based on speed changes.
-2. **Directional Flow**: The velocity vector ($v_x, v_y$) directly informs the network of the instantaneous drawing direction,
-   making it simple to map sequential curves even if their physical shapes overlap in space.
-3. **Training Stability**: Alongside adding these temporal features, we optimized the trainer with **gradient clipping
-   (`clipnorm=1.0`)** and set a **compact model size (32 units)** to stabilize training and achieve a highly reliable 80%+
-   accuracy!
+Outputs:
+
+- `handwriting_sequence_model.keras`
+- `sequence_vocab.json`
+
+Inference returns:
+
+- `prediction`
+- `confidence`
+- `letterSpans` (approximate start/end timesteps per predicted letter)
+- `usedTimesteps`
+
+---
+
+## 5. Are We Currently Using Time or Speed?
+
+**Yes, absolutely.**
+
+Both the character and sequence models consume the full temporal feature set (`delta_time`, `vx`, `vy`) in addition to coordinates
+and `pen_lift`.
+
+Why this helps:
+
+1. **Writing Rhythm**: Loops and corners often have distinct velocity signatures.
+2. **Directional Flow**: Velocity vectors encode local pen direction directly.
+3. **Stability**: Temporal context improves separation of shape-similar letters and connected forms.
+
+---
+
+## 6. Why Whole-Word Labels Work for Cursive
+
+For connected cursive, the sequence model uses CTC training, which learns alignment between stroke sequence and output text
+internally.
+
+You can label an entire connected word (for example `mag`) without manually marking where each letter starts.
+
+The model then learns likely boundaries from repeated examples.
+
+---
+
+## 7. Practical Data Guidance
+
+- Character recognition can work very well with a few hundred labeled letters.
+- Sequence word recognition needs more data.
+- A small `sequenceSamples` dataset can collapse to one-letter outputs.
+- For stable connected-word predictions, aim for at least `100+` sequence samples, then keep scaling up.
+- Repeating high-frequency words with style variation (speed, slant, spacing) improves robustness significantly.

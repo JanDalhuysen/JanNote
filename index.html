@@ -30,8 +30,12 @@
 
                 <div class="hero-card">
                     <!-- <label for="strokeLabel">Current character or word</label> -->
-                    <label for="strokeLabel">l</label>
+                    <label for="strokeLabel">Current label (character or word)</label>
                     <input id="strokeLabel" type="text" maxlength="24" />
+                    <div style="margin-top: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+                        <button id="nextPracticeWordBtn" class="secondary" type="button">Next Practice Word</button>
+                        <span id="practiceWordText">Practice word: -</span>
+                    </div>
                     <!-- placeholder="Type what you're about to draw" /> -->
                     <!-- <p class="hint">Enter a label before drawing. Leave it blank if you only want to capture ink.</p> -->
                 </div>
@@ -64,6 +68,13 @@
                             <input id="predictCheckbox" type="checkbox" checked />
                             <span>Auto-Predict</span>
                         </label>
+
+                        <label class="predict-toggle">
+                            <input id="continuousModeCheckbox" type="checkbox" />
+                            <span>Continuous Script</span>
+                        </label>
+
+                        <button id="commitWordBtn" class="secondary">Commit Word</button>
                     </div>
 
                     <!-- Label Mode Controls -->

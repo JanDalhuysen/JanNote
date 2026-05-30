@@ -23,7 +23,7 @@
 const fs = require("fs");
 
 // Read the JSON file
-const jsonData = fs.readFileSync("dutch.json", "utf-8");
+const jsonData = fs.readFileSync("english.json", "utf-8");
 const data = JSON.parse(jsonData);
 
 // Extract the words array
@@ -32,4 +32,4 @@ const words = data.words;
 const textData = words.join("\n");
 
 // Write the text data to a new file
-fs.writeFileSync("dutch.txt", textData);
+fs.writeFileSync("english.txt", textData);

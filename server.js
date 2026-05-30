@@ -107,8 +107,7 @@ fs.watch(__dirname, (eventType, filename) => {
 // Start the bridge on startup (if files exist)
 startPythonBridge();
 
-// Endpoint to run predictions
-app.post("/predict", (req, res) => {
+function handlePredictRequest(req, res, mode = "char") {
     console.log(
         `[HTTP POST /predict] Incoming request. Body keys: [${Object.keys(req.body || {})}]. Points count: ${req.body?.points?.length ?? "undefined"}`,
     );
@@ -135,26 +134,35 @@ app.post("/predict", (req, res) => {
                 return res.status(503).json({ error: "Python bridge is starting up. Please try drawing again in a moment." });
             }
             console.log("[HTTP POST /predict] Python bridge started successfully. Forwarding points.");
-            sendToPython(points, res);
+            sendToPython(points, res, mode);
         }, 1200);
         return;
     }
 
-    sendToPython(points, res);
-});
+    sendToPython(points, res, mode);
+}
+
+// Endpoint to run single-character predictions
+app.post("/predict", (req, res) => handlePredictRequest(req, res, "char"));
+
+// Endpoint scaffold for sequence predictions (currently uses same model/bridge)
+app.post("/predict-sequence", (req, res) => handlePredictRequest(req, res, "sequence"));
 
 // Endpoint to check model status
 app.get("/model-status", (req, res) => {
     const modelPath = path.join(__dirname, "handwriting_model.keras");
+    const seqModelPath = path.join(__dirname, "handwriting_sequence_model.keras");
     const exists = fs.existsSync(modelPath);
+    const seqExists = fs.existsSync(seqModelPath);
     res.json({
         modelTrained: exists,
+        sequenceModelTrained: seqExists,
         bridgeReady: pythonReady,
     });
 });
 
-function sendToPython(points, res) {
-    console.log(`[Python Bridge] Writing ${points.length} points to predict.py stdin...`);
+function sendToPython(points, res, mode = "char") {
+    console.log(`[Python Bridge] Writing ${points.length} points to predict.py stdin (mode=${mode})...`);
     const timeout = setTimeout(() => {
         console.error("[Python Bridge] TIMEOUT waiting for python response (4s limit reached).");
         // Remove callback from queue on timeout
@@ -179,7 +187,7 @@ function sendToPython(points, res) {
         },
     });
 
-    pythonProcess.stdin.write(JSON.stringify(points) + "\n");
+    pythonProcess.stdin.write(JSON.stringify({ mode, points }) + "\n");
 }
 
 app.get("/", (req, res) => {

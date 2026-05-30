@@ -2,6 +2,8 @@ const canvas = document.getElementById("inkCanvas");
 const context = canvas.getContext("2d");
 
 const strokeLabelInput = document.getElementById("strokeLabel");
+const nextPracticeWordBtn = document.getElementById("nextPracticeWordBtn");
+const practiceWordText = document.getElementById("practiceWordText");
 const clearButton = document.getElementById("clearBtn");
 const replayButton = document.getElementById("replayBtn");
 const pauseButton = document.getElementById("pauseBtn");
@@ -35,6 +37,8 @@ const canvasTip = document.getElementById("canvasTip");
 
 // Prediction UI Elements
 const predictCheckbox = document.getElementById("predictCheckbox");
+const continuousModeCheckbox = document.getElementById("continuousModeCheckbox");
+const commitWordBtn = document.getElementById("commitWordBtn");
 const predictionCard = document.getElementById("predictionCard");
 const predictionText = document.getElementById("predictionText");
 const predictionConfidenceText = document.getElementById("predictionConfidenceText");
@@ -60,13 +64,48 @@ const state = {
     model: null,
     classNames: [],
     predictMode: true,
+    continuousMode: false,
     finalizedLetters: [],
+    finalizedWords: [],
     finalizationTimer: null,
     dictionary: new Set(),
+    practiceWord: "",
 };
+
+const EASY_CONNECTED_WORDS = [
+    "the",
+    "be",
+    "of",
+    "and",
+    "a",
+    "to",
+    "in",
+    "he",
+    "have",
+    "it",
+    "that",
+    "for",
+    "they",
+    "with",
+    "as",
+    "not",
+    "on",
+    "she",
+    "at",
+    "by",
+    "this",
+    "we",
+    "you",
+    "do",
+];
 
 function getAllStrokes() {
     const all = [];
+    if (state.finalizedWords) {
+        for (const item of state.finalizedWords) {
+            all.push(...item.strokes);
+        }
+    }
     if (state.finalizedLetters) {
         for (const item of state.finalizedLetters) {
             all.push(...item.strokes);
@@ -135,6 +174,22 @@ function getStrokeCenter(stroke) {
 function getStrokeSpan(stroke) {
     const bounds = getStrokeBounds(stroke);
     return Math.hypot(bounds.width, bounds.height);
+}
+
+function getAdaptiveFinalizeDelayMs(stroke) {
+    if (!stroke || !stroke.points || stroke.points.length < 2) {
+        return 220;
+    }
+
+    const first = stroke.points[0];
+    const last = stroke.points[stroke.points.length - 1];
+    const dt = Math.max(1, last.time - first.time);
+    const distance = Math.hypot(last.x - first.x, last.y - first.y);
+    const speed = distance / dt;
+
+    if (speed > 0.75) return 150;
+    if (speed > 0.35) return 190;
+    return 230;
 }
 
 function guessWordCount(strokes) {
@@ -297,6 +352,55 @@ function updateRecognizedWords() {
 
     if (!sentenceBox || !breakdownList) return;
 
+    if (state.finalizedWords && state.finalizedWords.length > 0) {
+        const words = [...state.finalizedWords].sort((a, b) => {
+            const tA = a.strokes[0]?.startedAt || 0;
+            const tB = b.strokes[0]?.startedAt || 0;
+            return tA - tB;
+        });
+
+        const wordsData = words.map((w) => {
+            const text = (w.label || w.prediction || "?").trim() || "?";
+            const lower = text.toLowerCase();
+            const isOk = w.label ? state.dictionary.has(lower) : true;
+            return {
+                text,
+                isOk,
+                charCount: w.label ? w.label.replace(/\s+/g, "").length : 0,
+            };
+        });
+
+        sentenceBox.innerHTML = wordsData
+            .map((wd) => {
+                const spellErrorClass = wd.isOk ? "" : " spell-error";
+                const titleAttr = wd.isOk ? "" : ` title="Not found in words file"`;
+                const escaped = escapeHTML(wd.text);
+                return `<span class="word-span${spellErrorClass}"${titleAttr}>${escaped}</span>`;
+            })
+            .join(" ");
+
+        breakdownList.innerHTML = wordsData
+            .map((wd) => {
+                const rowClass = wd.isOk ? "" : " spell-error";
+                const textClass = wd.isOk ? "" : " spell-error";
+                const icon = wd.isOk
+                    ? `<span class="word-status-icon ok" title="Verified in dictionary">Verified</span>`
+                    : `<span class="word-status-icon err" title="Not found in words file">Not found</span>`;
+                const escaped = escapeHTML(wd.text);
+                return `
+            <div class="word-breakdown-row${rowClass}">
+                <span class="word-breakdown-text${textClass}">${escaped}</span>
+                <span class="word-breakdown-meta">
+                    <span>${wd.charCount} char${wd.charCount === 1 ? "" : "s"}</span>
+                    ${icon}
+                </span>
+            </div>
+        `;
+            })
+            .join("");
+        return;
+    }
+
     const wordGroups = groupLettersIntoWords();
 
     if (wordGroups.length === 0) {
@@ -352,6 +456,21 @@ function updateRecognizedWords() {
 
 function setStatus(message) {
     statusText.textContent = message;
+}
+
+function pickNextPracticeWord() {
+    if (!EASY_CONNECTED_WORDS.length) return;
+    const options = EASY_CONNECTED_WORDS.filter((w) => w !== state.practiceWord);
+    const pool = options.length ? options : EASY_CONNECTED_WORDS;
+    const word = pool[Math.floor(Math.random() * pool.length)];
+    state.practiceWord = word;
+    if (practiceWordText) {
+        practiceWordText.textContent = `Practice word: ${word}`;
+    }
+    if (strokeLabelInput) {
+        strokeLabelInput.value = word;
+    }
+    setStatus(`Practice prompt ready: "${word}". Write it in one connected stroke sequence, then Commit Word.`);
 }
 
 function redraw(activeTime = null) {
@@ -462,6 +581,21 @@ function redraw(activeTime = null) {
     }
 
     // 2. Draw active strokes currently being drawn
+    if (state.finalizedWords && state.finalizedWords.length > 0) {
+        for (const item of state.finalizedWords) {
+            for (const stroke of item.strokes) {
+                drawStroke(stroke, activeTime);
+            }
+        }
+    }
+
+    if (state.finalizedWords && state.finalizedWords.length > 0) {
+        for (const item of state.finalizedWords) {
+            drawWordBoundaryMarkers(item);
+        }
+    }
+
+    // 3. Draw active strokes currently being drawn
     for (const stroke of state.strokes) {
         drawStroke(stroke, activeTime);
     }
@@ -550,6 +684,52 @@ function drawStrokeTag(stroke) {
     }
 }
 
+function getFlattenedPointsFromStrokes(strokes) {
+    const points = [];
+    for (const stroke of strokes || []) {
+        for (const pt of stroke.points || []) {
+            points.push(pt);
+        }
+    }
+    points.sort((a, b) => (a.time || 0) - (b.time || 0));
+    return points;
+}
+
+function drawWordBoundaryMarkers(wordItem) {
+    if (!wordItem || !Array.isArray(wordItem.letterSpans) || wordItem.letterSpans.length === 0) {
+        return;
+    }
+
+    const flattened = getFlattenedPointsFromStrokes(wordItem.strokes);
+    if (flattened.length < 2) return;
+
+    const usedTimesteps = Math.max(1, wordItem.usedTimesteps || 192);
+    const bounds = wordItem.bounds || getStrokeBounds({ points: flattened });
+
+    context.save();
+    context.shadowBlur = 0;
+    context.lineWidth = 1.5;
+    context.strokeStyle = "rgba(250, 204, 21, 0.95)";
+    context.fillStyle = "rgba(250, 204, 21, 0.95)";
+    context.font = "bold 11px Inter, sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "bottom";
+
+    for (const span of wordItem.letterSpans) {
+        const endStep = Math.max(0, Math.min(usedTimesteps - 1, span.endStep ?? 0));
+        const frac = usedTimesteps > 1 ? endStep / (usedTimesteps - 1) : 0;
+        const idx = Math.max(0, Math.min(flattened.length - 1, Math.round(frac * (flattened.length - 1))));
+        const anchor = flattened[idx];
+
+        context.beginPath();
+        context.moveTo(anchor.x, bounds.minY - 2);
+        context.lineTo(anchor.x, bounds.maxY + 2);
+        context.stroke();
+        context.fillText(span.char || "?", anchor.x, bounds.minY - 8);
+    }
+    context.restore();
+}
+
 function finishStroke() {
     if (!state.currentStroke) {
         return;
@@ -568,7 +748,9 @@ function finishStroke() {
         state.unlabeledStrokes += 1;
     }
     state.durationMs = Math.max(state.durationMs, stroke.completedAt);
-    strokeLabelInput.value = "";
+    if (!state.continuousMode) {
+        strokeLabelInput.value = "";
+    }
     setStatus("Ready to draw");
     replayButton.disabled = false;
     updateStats();
@@ -577,7 +759,10 @@ function finishStroke() {
     if (state.finalizationTimer) {
         clearTimeout(state.finalizationTimer);
     }
-    state.finalizationTimer = setTimeout(finalizeCurrentLetter, 850);
+    if (!state.continuousMode) {
+        const delayMs = getAdaptiveFinalizeDelayMs(stroke);
+        state.finalizationTimer = setTimeout(finalizeCurrentLetter, delayMs);
+    }
 
     if (!state.predictMode) {
         clearPredictionDisplay();
@@ -600,7 +785,7 @@ function startStroke(event) {
     }
 
     // Spatial boundary finalization check (for fast writing support)
-    if (state.strokes.length > 0) {
+    if (!state.continuousMode && state.strokes.length > 0) {
         let minX = Infinity,
             minY = Infinity,
             maxX = -Infinity,
@@ -645,6 +830,7 @@ function handleLabelClick(event) {
     const clickPt = getCanvasPoint(event);
     let closestStroke = null;
     let closestGroup = null;
+    let closestWordGroup = null;
     let minDistance = Infinity;
 
     // Check active strokes
@@ -671,7 +857,40 @@ function handleLabelClick(event) {
         }
     }
 
+    // Check finalized connected words' strokes
+    if (state.finalizedWords) {
+        for (const item of state.finalizedWords) {
+            for (const stroke of item.strokes) {
+                const dist = getMinDistanceToStroke(clickPt, stroke);
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    closestStroke = stroke;
+                    closestGroup = null;
+                    closestWordGroup = item;
+                }
+            }
+        }
+    }
+
     if (closestStroke && minDistance < 18) {
+        if (closestWordGroup) {
+            const typedWord = (strokeLabelInput.value || "").trim();
+            const newLabel = typedWord || closestWordGroup.label || "";
+            closestWordGroup.label = newLabel;
+            for (const s of closestWordGroup.strokes) {
+                s.label = newLabel;
+            }
+            if (typedWord) {
+                setStatus(`Word labeled as "${typedWord}"`);
+            } else {
+                setStatus("Type a word in the label box, then click the connected word to label it.");
+            }
+            redraw();
+            updateStats();
+            updateRecognizedWords();
+            return;
+        }
+
         if (closestGroup) {
             const currentLabel = closestGroup.label || "";
             const newLabel = currentLabel === state.activeLabel ? "" : state.activeLabel;
@@ -754,6 +973,7 @@ function stopStroke(event) {
 function clearCanvas() {
     state.strokes = [];
     state.finalizedLetters = [];
+    state.finalizedWords = [];
     if (state.finalizationTimer) {
         clearTimeout(state.finalizationTimer);
         state.finalizationTimer = null;
@@ -904,7 +1124,7 @@ function setMode(newMode) {
         drawingStats.classList.add("hidden");
         datasetStats.classList.remove("hidden");
         document.body.classList.add("mode-label");
-        canvasTip.textContent = `Click strokes to label them as '${state.activeLabel}'.`;
+        canvasTip.textContent = `Click letters to label with '${state.activeLabel}', or type a whole word then click a connected word.`;
         setStatus(`Labeling mode (Active: '${state.activeLabel}')`);
     }
     redraw();
@@ -935,6 +1155,7 @@ function setActiveLabel(newLabel) {
 // Grouping and normalization logic for dataset export
 function compileDataset() {
     const finalGroups = [];
+    const sequenceSamples = [];
 
     // 1. Add finalized letters directly as pre-grouped samples
     if (state.finalizedLetters) {
@@ -943,6 +1164,21 @@ function compileDataset() {
                 label: item.label || "",
                 strokes: item.strokes,
                 startedAt: item.strokes[0]?.startedAt || 0,
+            });
+        }
+    }
+
+    if (state.finalizedWords) {
+        for (const item of state.finalizedWords) {
+            if (!item.label) continue;
+            sequenceSamples.push({
+                id: `sequence_${Date.now()}_${item.label}`,
+                text: item.label,
+                strokeCount: item.strokes.length,
+                rawStrokes: item.strokes.map((s) => ({
+                    points: s.points.map((p) => ({ x: p.x, y: p.y, time: p.time })),
+                })),
+                normalizedStrokes: normalizeStrokes(item.strokes),
             });
         }
     }
@@ -1012,10 +1248,12 @@ function compileDataset() {
             totalStrokes: allStrokes.length,
             totalLabeledStrokes: labeledStrokes.length,
             totalSamples: processedSamples.length,
+            totalSequenceSamples: sequenceSamples.length,
             canvasWidth: canvas.width / (window.devicePixelRatio || 1),
             canvasHeight: canvas.height / (window.devicePixelRatio || 1),
         },
         samples: processedSamples,
+        sequenceSamples: sequenceSamples,
     };
 }
 
@@ -1112,6 +1350,14 @@ clearLabelsBtn.addEventListener("click", () => {
                 }
             }
         }
+        if (state.finalizedWords) {
+            for (const item of state.finalizedWords) {
+                item.label = "";
+                for (const stroke of item.strokes) {
+                    stroke.label = "";
+                }
+            }
+        }
         redraw();
         updateStats();
         updateRecognizedWords();
@@ -1169,6 +1415,7 @@ function importDataset(data) {
     }
     state.strokes = [];
     state.finalizedLetters = [];
+    state.finalizedWords = [];
     state.currentStroke = null;
     state.drawing = false;
     state.replaying = false;
@@ -1360,6 +1607,101 @@ function clearPredictionDisplay() {
     }
     if (predictionConfidenceBar) {
         predictionConfidenceBar.style.width = "0%";
+    }
+}
+
+async function finalizeCurrentWord() {
+    if (!state.strokes.length) return;
+
+    const wordLabel = (strokeLabelInput.value || "").trim();
+
+    let minX = Infinity,
+        minY = Infinity,
+        maxX = -Infinity,
+        maxY = -Infinity;
+    for (const stroke of state.strokes) {
+        const b = getStrokeBounds(stroke);
+        minX = Math.min(minX, b.minX);
+        minY = Math.min(minY, b.minY);
+        maxX = Math.max(maxX, b.maxX);
+        maxY = Math.max(maxY, b.maxY);
+    }
+    const bounds = { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
+    const strokesToCommit = [...state.strokes];
+    for (const stroke of strokesToCommit) {
+        stroke.isFinalized = true;
+        stroke.label = wordLabel;
+    }
+
+    const newWord = {
+        label: wordLabel,
+        prediction: "?",
+        confidence: 0,
+        bounds,
+        strokes: strokesToCommit,
+        letterSpans: [],
+        usedTimesteps: 0,
+    };
+    state.finalizedWords.push(newWord);
+
+    state.totalCharacters += wordLabel.replace(/\s+/g, "").length;
+    state.strokes = [];
+    strokeLabelInput.value = "";
+    setStatus(wordLabel ? `Committed word "${wordLabel}"` : "Committed unlabeled word. Label it later in Label Mode.");
+    updateStats();
+    redraw();
+    updateRecognizedWords();
+    pickNextPracticeWord();
+
+    if (!state.predictMode) {
+        return;
+    }
+
+    try {
+        const normalizedStrokes = normalizeStrokes(strokesToCommit);
+        const seqPoints = [];
+        for (const stroke of normalizedStrokes) {
+            const pts = stroke.points;
+            for (let idx = 0; idx < pts.length; idx++) {
+                const pt = pts[idx];
+                const penLift = idx === pts.length - 1 ? 1.0 : 0.0;
+                seqPoints.push([pt.x / 256.0, pt.y / 256.0, penLift, pt.time]);
+            }
+        }
+
+        if (seqPoints.length === 0) return;
+
+        const response = await fetch("/predict-sequence", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ points: seqPoints }),
+        });
+
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.error) return;
+
+        newWord.prediction = data.prediction || "?";
+        newWord.confidence = data.confidence || 0;
+        newWord.letterSpans = Array.isArray(data.letterSpans) ? data.letterSpans : [];
+        newWord.usedTimesteps = data.usedTimesteps || 0;
+
+        const confidence = Math.round((data.confidence || 0) * 100);
+        if (predictionText) {
+            predictionText.textContent = data.prediction || "?";
+        }
+        if (predictionConfidenceText) {
+            predictionConfidenceText.textContent = `${confidence}%`;
+        }
+        if (predictionConfidenceBar) {
+            predictionConfidenceBar.style.width = `${confidence}%`;
+        }
+        redraw();
+        updateRecognizedWords();
+    } catch (error) {
+        console.error("Failed to run sequence prediction:", error);
     }
 }
 
@@ -1591,9 +1933,34 @@ if (predictCheckbox) {
     });
 }
 
+if (continuousModeCheckbox) {
+    continuousModeCheckbox.addEventListener("change", () => {
+        state.continuousMode = continuousModeCheckbox.checked;
+        if (state.continuousMode) {
+            setStatus("Continuous script mode ON. Draw connected writing, then click Commit Word.");
+        } else {
+            setStatus("Continuous script mode OFF. Character auto-finalization is active.");
+        }
+    });
+}
+
+if (commitWordBtn) {
+    commitWordBtn.addEventListener("click", () => {
+        finalizeCurrentWord();
+    });
+}
+
+if (nextPracticeWordBtn) {
+    nextPracticeWordBtn.addEventListener("click", () => {
+        pickNextPracticeWord();
+    });
+}
+
 window.addEventListener("resize", resizeCanvas);
+
 syncSpeed();
 resizeCanvas();
 updateStats();
 loadModel();
 loadDictionary();
+pickNextPracticeWord();

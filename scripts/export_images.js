@@ -73,10 +73,12 @@ function generateSvg(strokes) {
         }
     }
 
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" style="background-color: #0f172a; border-radius: 8px;">
-  <!-- Inner boundary showing the 256x256 limits -->
-  <rect x="0" y="0" width="256" height="256" stroke="#1e293b" stroke-width="2" fill="none" />
-${pathsHtml}</svg>`;
+    //     return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" style="background-color: #0f172a; border-radius: 8px;">
+    //   <!-- Inner boundary showing the 256x256 limits -->
+    //   <rect x="0" y="0" width="256" height="256" stroke="#1e293b" stroke-width="2" fill="none" />
+    // ${pathsHtml}</svg>`;
+
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="1000" height="1000" style="background-color: #0f172a; border-radius: 8px;">${pathsHtml}</svg>`;
 }
 
 function generatePng(svgContent) {
@@ -139,10 +141,10 @@ function main() {
         }
 
         const samples = data.samples || [];
-        if (samples.length === 0) {
-            console.log(`No samples found in ${file}. Skipping.`);
-            continue;
-        }
+        // if (samples.length === 0) {
+        // console.log(`No samples found in ${file}. Skipping.`);
+        // continue;
+        // }
 
         console.log(`Processing ${samples.length} samples from ${file}...`);
 
@@ -183,11 +185,122 @@ function main() {
             totalExported++;
 
             // Also export png of each svg using sharp
+            // generatePng(svgContent)
+            //     .then((pngBuffer) => {
+            //         if (pngBuffer) {
+            //             const pngFileName = `${fileBasename}_${sampleId}.png`;
+            //             const pngOutputPath = path.join(labelDir, pngFileName);
+            //             // fs.writeFileSync(pngOutputPath, pngBuffer);
+            //         }
+            //     })
+            //     .catch((err) => {
+            //         console.error(`Error generating PNG for ${outputFileName}:`, err);
+            //     });
+        }
+
+        // {
+        //     "id": "sequence_1779732636799_never",
+        //     "text": "never",
+        //     "strokeCount": 1,
+        //     "rawStrokes": [
+        //         {
+        //             "points": [
+        //                 {
+        //                     "x": 66.79998779296875,
+        //                     "y": 363.20001220703125,
+        //                     "time": 23056.60000000149
+        //                 },
+
+        const sequenceSamples = data.sequenceSamples || [];
+        if (sequenceSamples.length > 0) {
+            console.log(`Processing ${sequenceSamples.length} sequence samples from ${file}...`);
+
+            for (const sample of sequenceSamples) {
+                const sampleId = sample.id || `sequence_sample_${Date.now()}`;
+                const label = sample.text || "empty";
+                console.log(`Processing sequence sample: ${sampleId} with label: '${label}'`);
+
+                let strokes = sample.normalizedStrokes;
+                let isNormalized = true;
+
+                if (!strokes || strokes.length === 0) {
+                    strokes = sample.rawStrokes;
+                    isNormalized = false;
+                }
+
+                if (!strokes || strokes.length === 0) {
+                    continue;
+                }
+
+                if (!isNormalized) {
+                    strokes = normalizeRawStrokes(strokes);
+                }
+
+                // const folderName = getSafeFolderName(label);
+                // const labelDir = path.join(debugDir, folderName);
+                // put all the words in the debug folder called words
+                const labelDir = path.join(debugDir, "words");
+
+                if (!fs.existsSync(labelDir)) {
+                    fs.mkdirSync(labelDir, { recursive: true });
+                }
+
+                const svgContent = generateSvg(strokes);
+                const outputFileName = `${fileBasename}_${sampleId}.svg`;
+                const outputPath = path.join(labelDir, outputFileName);
+
+                // fs.writeFileSync(outputPath, svgContent, "utf8");
+                totalExported++;
+
+                // Also export png of each svg using sharp
+                // generatePng(svgContent)
+                //     .then((pngBuffer) => {
+                //         if (pngBuffer) {
+                //             const pngFileName = `${fileBasename}_${sampleId}.png`;
+                //             const pngOutputPath = path.join(labelDir, pngFileName);
+                //             fs.writeFileSync(pngOutputPath, pngBuffer);
+                //         }
+                //     })
+                //     .catch((err) => {
+                //         console.error(`Error generating PNG for ${outputFileName}:`, err);
+                //     });
+            }
+        }
+
+        // export a whole json file as a single svg
+        const allStrokes = [];
+
+        for (const sample of samples) {
+            let strokes = sample.rawStrokes;
+
+            if (!strokes || strokes.length === 0) {
+                strokes = sample.rawStrokes;
+                isNormalized = false;
+            }
+
+            if (!strokes || strokes.length === 0) {
+                continue;
+            }
+
+            // if (!isNormalized) {
+            // strokes = normalizeRawStrokes(strokes);
+            // }
+
+            allStrokes.push(...strokes);
+        }
+
+        if (allStrokes.length > 0) {
+            const svgContent = generateSvg(allStrokes);
+            const outputFileName = `${fileBasename}_all_samples.svg`;
+            const outputPath = path.join(debugDir, outputFileName);
+            fs.writeFileSync(outputPath, svgContent, "utf8");
+
+            // Also export png of each svg using sharp
             generatePng(svgContent)
                 .then((pngBuffer) => {
                     if (pngBuffer) {
-                        const pngFileName = `${fileBasename}_${sampleId}.png`;
-                        const pngOutputPath = path.join(labelDir, pngFileName);
+                        const pngFileName = `${fileBasename}_all_samples.png`;
+                        const pngOutputPath = path.join(debugDir, pngFileName);
                         fs.writeFileSync(pngOutputPath, pngBuffer);
                     }
                 })

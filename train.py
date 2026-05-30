@@ -9,39 +9,37 @@ from tensorflow import keras
 tf.random.set_seed(42)
 np.random.seed(42)
 
+CHAR_TARGET_LEN = 128
+SEQ_TARGET_LEN = 192
+MAX_LABEL_LEN = 24
+BLANK_TOKEN = "<blank>"
 
-def load_latest_dataset():
-    # Search for files matching handwriting_dataset_*.json
+
+def load_combined_dataset():
     files = glob.glob("handwriting_dataset_*.json")
     if not files:
-        # Fallback to searching any .json file that is not class_names.json or package.json
         all_files = glob.glob("*.json")
-        files = [f for f in all_files if f not in ["class_names.json", "package.json", "package-lock.json"]]
+        files = [
+            f for f in all_files if f not in ["class_names.json", "package.json", "package-lock.json", "sequence_vocab.json"]
+        ]
 
     if not files:
-        raise FileNotFoundError(
-            "Could not find any handwriting dataset JSON files in the current folder.\nPlease download your exported dataset and place it in this directory (e.g. 'handwriting_dataset_XXXX.json')."
-        )
+        raise FileNotFoundError("No handwriting_dataset_*.json files found.")
 
-    # Sort by modification time to get the newest file
     files.sort(key=os.path.getmtime, reverse=True)
-    # load all files and combine them into one dataset
-    combined_dataset = {"samples": []}
+    merged = {"samples": [], "sequenceSamples": []}
     for file in files:
         print(f"Loading dataset file: {file}")
-        with open(file, "r") as f:
+        with open(file, "r", encoding="utf-8") as f:
             data = json.load(f)
-            if "samples" in data:
-                combined_dataset["samples"].extend(data["samples"])
-            else:
-                print(f"Warning: File {file} does not contain 'samples' key. Skipping.")
-    print(f"Total samples loaded from {len(files)} files: {len(combined_dataset['samples'])}")
-    return combined_dataset
-    # latest_file = files[0]
-    # print(f"Found latest dataset file: {latest_file}")
+            merged["samples"].extend(data.get("samples", []))
+            merged["sequenceSamples"].extend(data.get("sequenceSamples", []))
 
-    # with open(latest_file, "r") as f:
-    # return json.load(f)
+    print(
+        f"Loaded {len(merged['samples'])} char samples and "
+        f"{len(merged['sequenceSamples'])} sequence samples from {len(files)} files."
+    )
+    return merged
 
 
 def add_temporal_features(seq_points):
@@ -58,9 +56,7 @@ def add_temporal_features(seq_points):
         else:
             prev_x, prev_y, _, prev_t = seq_points[i - 1]
             dt_ms = t - prev_t
-            dt = dt_ms / 1000.0  # convert to seconds
-
-            # Avoid division by zero or extremely small time increments
+            dt = dt_ms / 1000.0
             if dt > 0.001:
                 vx = (x - prev_x) / dt
                 vy = (y - prev_y) / dt
@@ -68,98 +64,110 @@ def add_temporal_features(seq_points):
                 dt = 0.0
                 vx = 0.0
                 vy = 0.0
-
         featured_seq.append([x, y, pen_lift, dt, vx, vy])
     return featured_seq
 
 
-def preprocess_samples(dataset, target_len=128):
-    samples = dataset.get("samples", [])
-    if not samples:
-        raise ValueError("Dataset does not contain any samples.")
+def flatten_strokes(strokes):
+    seq_points = []
+    global_point_idx = 0
+    for stroke in strokes:
+        pts = stroke.get("points", [])
+        for idx, pt in enumerate(pts):
+            pen_lift = 1.0 if idx == len(pts) - 1 else 0.0
+            nx = pt["x"] / 256.0
+            ny = pt["y"] / 256.0
+            t = pt.get("time", float(global_point_idx * 20.0))
+            seq_points.append([nx, ny, pen_lift, t])
+            global_point_idx += 1
+    return seq_points
 
+
+def pad_or_resample(features, target_len):
+    seq_len = len(features)
+    if seq_len == 0:
+        return np.zeros((target_len, 6), dtype=np.float32), 1
+    if seq_len < target_len:
+        padded = features + [[0.0] * 6] * (target_len - seq_len)
+        return np.asarray(padded, dtype=np.float32), seq_len
+    indices = np.linspace(0, seq_len - 1, target_len).astype(int)
+    resampled = [features[i] for i in indices]
+    return np.asarray(resampled, dtype=np.float32), target_len
+
+
+def preprocess_char_samples(dataset):
     X = []
     y_labels = []
-
-    for sample in samples:
-        label = sample.get("label")
-        # We use normalizedStrokes which are already scaled to a 256x256 box
-        strokes = sample.get("normalizedStrokes", [])
-
-        # Flatten all points from all strokes into a single sequence
-        seq_points = []
-        global_point_idx = 0
-        for stroke in strokes:
-            pts = stroke.get("points", [])
-            for idx, pt in enumerate(pts):
-                # pen_lift = 1.0 if this is the last point of the stroke, else 0.0
-                pen_lift = 1.0 if idx == len(pts) - 1 else 0.0
-
-                # Normalize coordinate values to [0.0, 1.0] by dividing by 256
-                nx = pt["x"] / 256.0
-                ny = pt["y"] / 256.0
-
-                # Fetch time, fallback to generated index time if missing
-                t = pt.get("time", float(global_point_idx * 20.0))
-                seq_points.append([nx, ny, pen_lift, t])
-                global_point_idx += 1
-
-        if not seq_points:
+    for sample in dataset.get("samples", []):
+        label = (sample.get("label") or "").strip()
+        if not label:
             continue
-
-        # Compute temporal features (dt, vx, vy)
-        featured_points = add_temporal_features(seq_points)
-
-        # Resample or pad the sequence to target_len (128 points)
-        seq_len = len(featured_points)
-        if seq_len < target_len:
-            # Pad with 6-element zero vectors
-            padded = featured_points + [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * (target_len - seq_len)
-            X.append(padded)
-        else:
-            # Downsample uniformly
-            indices = np.linspace(0, seq_len - 1, target_len).astype(int)
-            resampled = [featured_points[i] for i in indices]
-            X.append(resampled)
-
+        strokes = sample.get("normalizedStrokes", [])
+        seq = flatten_strokes(strokes)
+        if not seq:
+            continue
+        featured = add_temporal_features(seq)
+        x, _ = pad_or_resample(featured, CHAR_TARGET_LEN)
+        X.append(x)
         y_labels.append(label)
 
-    return np.array(X, dtype=np.float32), y_labels
+    if not X:
+        return None, None
+    return np.asarray(X, dtype=np.float32), y_labels
 
 
-def main():
-    print("=== Starting Handwriting LSTM Model Trainer ===")
+def preprocess_sequence_samples(dataset):
+    sequence_samples = dataset.get("sequenceSamples", [])
+    X_list = []
+    input_lengths = []
+    texts = []
+    for sample in sequence_samples:
+        text = (sample.get("text") or "").strip()
+        if not text:
+            continue
+        seq = flatten_strokes(sample.get("normalizedStrokes", []))
+        if not seq:
+            continue
+        featured = add_temporal_features(seq)
+        x, used_len = pad_or_resample(featured, SEQ_TARGET_LEN)
+        X_list.append(x)
+        input_lengths.append(used_len)
+        texts.append(text)
 
-    # 1. Load dataset
-    try:
-        dataset = load_latest_dataset()
-    except Exception as e:
-        print(f"Error: {e}")
-        return
+    if not X_list:
+        return None
 
-    # 2. Preprocess data
-    X, y_labels = preprocess_samples(dataset)
-    print(f"Loaded {len(X)} samples. Input tensor shape: {X.shape}")
+    charset = sorted(set("".join(texts)))
+    char_to_idx = {c: i for i, c in enumerate(charset)}
+    labels = np.full((len(texts), MAX_LABEL_LEN), fill_value=-1, dtype=np.int32)
+    label_lengths = np.zeros((len(texts), 1), dtype=np.int32)
+    for i, text in enumerate(texts):
+        encoded = [char_to_idx[c] for c in text[:MAX_LABEL_LEN]]
+        labels[i, : len(encoded)] = encoded
+        label_lengths[i, 0] = len(encoded)
 
-    # 3. Create class mapping
+    return {
+        "X": np.asarray(X_list, dtype=np.float32),
+        "input_lengths": np.asarray(input_lengths, dtype=np.int32).reshape(-1, 1),
+        "labels": labels,
+        "label_lengths": label_lengths,
+        "charset": charset,
+    }
+
+
+def train_char_model(X, y_labels):
     unique_classes = sorted(list(set(y_labels)))
     class_to_idx = {char: idx for idx, char in enumerate(unique_classes)}
-
     y = np.array([class_to_idx[lbl] for lbl in y_labels], dtype=np.int32)
     num_classes = len(unique_classes)
-    print(f"Unique characters to recognize ({num_classes}): {unique_classes}")
+    print(f"Training char model with {len(X)} samples, classes={num_classes}")
 
-    # 4. Save class mapping to JSON
-    with open("class_names.json", "w") as f:
-        json.dump(unique_classes, f)
-    print("Saved class names mapping to class_names.json")
+    with open("class_names.json", "w", encoding="utf-8") as f:
+        json.dump(unique_classes, f, ensure_ascii=False)
 
-    # 5. Build Recurrent Model (LSTM)
-    # We use a slightly smaller capacity model (32 units) to prevent overfitting on
-    # a tiny dataset and to stabilize training.
     model = keras.Sequential(
         [
-            keras.layers.Input(shape=(128, 6)),
+            keras.layers.Input(shape=(CHAR_TARGET_LEN, 6)),
             keras.layers.LSTM(32, return_sequences=True),
             keras.layers.LSTM(32),
             keras.layers.Dense(32, activation="relu"),
@@ -168,27 +176,92 @@ def main():
         ]
     )
 
-    # Using Adam with gradient clipping (clipnorm=1.0) to prevent the LSTM
-    # from getting stuck/diverging at low accuracy (e.g. 17%).
     opt = keras.optimizers.Adam(learning_rate=0.001, clipnorm=1.0)
     model.compile(optimizer=opt, loss="sparse_categorical_crossentropy", metrics=["accuracy"])
 
-    model.summary()
-
-    # 6. Train the model
-    epochs = 32 + 32 + 32
+    epochs = 32 + 32
     batch_size = min(16, len(X))
+    model.fit(
+        X,
+        y,
+        epochs=epochs,
+        batch_size=batch_size,
+        validation_split=0.15 if len(X) >= 10 else 0.0,
+        verbose=1,
+    )
 
-    print(f"\nTraining model for {epochs} epochs (batch_size={batch_size})...")
-    model.fit(X, y, epochs=epochs, batch_size=batch_size, validation_split=0.15 if len(X) >= 10 else 0.0, verbose=1)
-
-    # 7. Save standard Keras model
-    print("\nSaving model as standard handwriting_model.keras...")
     model.save("handwriting_model.keras")
+    print("Saved handwriting_model.keras and class_names.json")
 
-    print("\n=== Model training complete! ===")
-    print("Model saved to: handwriting_model.keras")
-    print("Class mapping saved to: class_names.json")
+
+def build_sequence_models(vocab_size):
+    input_x = keras.layers.Input(shape=(SEQ_TARGET_LEN, 6), name="input_x")
+    labels = keras.layers.Input(shape=(MAX_LABEL_LEN,), dtype="int32", name="labels")
+    input_len = keras.layers.Input(shape=(1,), dtype="int32", name="input_len")
+    label_len = keras.layers.Input(shape=(1,), dtype="int32", name="label_len")
+
+    x = keras.layers.Masking(mask_value=0.0)(input_x)
+    x = keras.layers.Bidirectional(keras.layers.LSTM(64, return_sequences=True))(x)
+    x = keras.layers.Bidirectional(keras.layers.LSTM(64, return_sequences=True))(x)
+    y_pred = keras.layers.Dense(vocab_size + 1, activation="softmax", name="y_pred")(x)
+
+    def ctc_loss_fn(args):
+        y_pred_arg, labels_arg, input_len_arg, label_len_arg = args
+        return keras.backend.ctc_batch_cost(labels_arg, y_pred_arg, input_len_arg, label_len_arg)
+
+    ctc_loss = keras.layers.Lambda(ctc_loss_fn, name="ctc_loss")([y_pred, labels, input_len, label_len])
+
+    train_model = keras.Model(inputs=[input_x, labels, input_len, label_len], outputs=ctc_loss, name="ctc_train_model")
+    infer_model = keras.Model(inputs=input_x, outputs=y_pred, name="ctc_infer_model")
+    return train_model, infer_model
+
+
+def train_sequence_model(seq_data):
+    X = seq_data["X"]
+    labels = seq_data["labels"]
+    input_lengths = seq_data["input_lengths"]
+    label_lengths = seq_data["label_lengths"]
+    charset = seq_data["charset"]
+    vocab_size = len(charset)
+
+    print(f"Training sequence model with {len(X)} samples, charset={vocab_size}")
+    train_model, infer_model = build_sequence_models(vocab_size)
+    train_model.compile(loss={"ctc_loss": lambda _y_true, y_pred: y_pred}, optimizer=keras.optimizers.Adam(0.001))
+
+    dummy_y = np.zeros((len(X), 1), dtype=np.float32)
+    train_model.fit(
+        [X, labels, input_lengths, label_lengths],
+        dummy_y,
+        batch_size=min(8, len(X)),
+        epochs=32 + 32 + 32 + 32,
+        validation_split=0.1 if len(X) >= 10 else 0.0,
+        verbose=1,
+    )
+
+    infer_model.save("handwriting_sequence_model.keras")
+    with open("sequence_vocab.json", "w", encoding="utf-8") as f:
+        json.dump({"chars": charset, "blank": BLANK_TOKEN, "targetLen": SEQ_TARGET_LEN}, f, ensure_ascii=False)
+    print("Saved handwriting_sequence_model.keras and sequence_vocab.json")
+
+
+def main():
+    print("=== Starting Handwriting Trainer (char + sequence) ===")
+    dataset = load_combined_dataset()
+
+    X_char, y_char = preprocess_char_samples(dataset)
+    if X_char is not None and len(X_char) > 0:
+        # train_char_model(X_char, y_char)
+        pass
+    else:
+        print("No character samples found. Skipping character model.")
+
+    seq_data = preprocess_sequence_samples(dataset)
+    if seq_data is not None and len(seq_data["X"]) > 0:
+        train_sequence_model(seq_data)
+    else:
+        print("No sequenceSamples found. Skipping sequence model.")
+
+    print("=== Training complete ===")
 
 
 if __name__ == "__main__":

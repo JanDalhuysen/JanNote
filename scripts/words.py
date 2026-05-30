@@ -3,7 +3,7 @@ import os
 
 def filter_cursive_words(input_filename, output_filename):
     # Set of letters that require lifting the pen
-    forbidden_letters = {"x", "q"}
+    forbidden_letters = {"x", "q", "i", "j", "t"}
 
     try:
         # Open and read the input file
