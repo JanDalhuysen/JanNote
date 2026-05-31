@@ -1,6 +1,6 @@
 # JanNote
 
-![JanNote_v1](JanNote_v1.png)
+![JanNote_v2](JanNote_v2.png)
 
 **Ink Replay & Handwriting Recognition Prototype**
 
@@ -42,6 +42,7 @@ ecosystem:
 - **Phase 2: Dataset Collection & Exporting**
     - Added **Label Mode** to assign ground-truth characters to drawn strokes.
     - Integrated **Dataset Exporting** to download drawing sessions as JSON datasets.
+    - Added **Periodic Autosave Sync** so labeled samples are pushed back to the server automatically.
 - **Phase 3: Deep Learning & Auto-Predict**
     - Built a **TensorFlow LSTM classifier** (`train.py`) and a Node-spawned **Python Inference Bridge** (`predict.py`) for live,
       on-the-fly character classification.

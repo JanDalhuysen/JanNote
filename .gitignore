@@ -4,3 +4,9 @@ temp
 tmp
 
 debug
+
+scripts/*.json
+scripts/*.txt
+
+notes
+autosave

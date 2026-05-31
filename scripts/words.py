@@ -3,7 +3,8 @@ import os
 
 def filter_cursive_words(input_filename, output_filename):
     # Set of letters that require lifting the pen
-    forbidden_letters = {"x", "q", "i", "j", "t"}
+    # forbidden_letters = {"x", "q", "i", "j", "t", "k", "f"}
+    forbidden_letters = {"q", "x"}
 
     try:
         # Open and read the input file
@@ -21,6 +22,9 @@ def filter_cursive_words(input_filename, output_filename):
         # Make all words lowercase
         clean_words = [word.lower() for word in clean_words]
 
+        # Only words with less than 6 characters
+        clean_words = [word for word in clean_words if len(word) < 6]
+
         # Write the filtered words to the output file
         with open(output_filename, "w", encoding="utf-8") as outfile:
             for word in clean_words:
@@ -35,7 +39,7 @@ def filter_cursive_words(input_filename, output_filename):
 # Run the program
 if __name__ == "__main__":
     # Change these filenames if your files have different names
-    input_file = "10k.txt"
-    output_file = "seamless_words.txt"
+    input_file = "all_words.txt"
+    output_file = "dictionary.txt"
 
     filter_cursive_words(input_file, output_file)

@@ -19,6 +19,10 @@ const wpmValue = document.getElementById("wpmValue");
 const elapsedValue = document.getElementById("elapsedValue");
 
 // Mode & Label UI Elements
+const notesModeBtn = document.getElementById("notesModeBtn");
+const datasetModeBtn = document.getElementById("datasetModeBtn");
+const datasetSubModeToggle = document.getElementById("datasetSubModeToggle");
+const datasetSubModeDivider = document.getElementById("datasetSubModeDivider");
 const drawModeBtn = document.getElementById("drawModeBtn");
 const labelModeBtn = document.getElementById("labelModeBtn");
 const drawControls = document.getElementById("drawControls");
@@ -34,6 +38,8 @@ const datasetStats = document.getElementById("datasetStats");
 const labeledCountEl = document.getElementById("labeledCount");
 const samplesBreakdownEl = document.getElementById("samplesBreakdown");
 const canvasTip = document.getElementById("canvasTip");
+const labelPracticeRow = document.getElementById("labelPracticeRow");
+const recognizedWordsPanel = document.getElementById("recognizedWordsPanel");
 
 // Prediction UI Elements
 const predictCheckbox = document.getElementById("predictCheckbox");
@@ -43,6 +49,14 @@ const predictionCard = document.getElementById("predictionCard");
 const predictionText = document.getElementById("predictionText");
 const predictionConfidenceText = document.getElementById("predictionConfidenceText");
 const predictionConfidenceBar = document.getElementById("predictionConfidenceBar");
+const predictionBadge = document.getElementById("predictionBadge");
+
+// Note Management UI Elements
+const noteTitleInput = document.getElementById("noteTitleInput");
+const noteTitleLabel = document.getElementById("noteTitleLabel");
+const syncStatusElement = document.getElementById("syncStatus");
+const newNoteBtn = document.getElementById("newNoteBtn");
+const notesListContainer = document.getElementById("notesList");
 
 const state = {
     strokes: [],
@@ -59,6 +73,7 @@ const state = {
     durationMs: 0,
     pointerId: null,
     speed: 1,
+    workspaceMode: "notes", // "notes" or "dataset"
     mode: "draw", // "draw" or "label"
     activeLabel: "a",
     model: null,
@@ -70,34 +85,106 @@ const state = {
     finalizationTimer: null,
     dictionary: new Set(),
     practiceWord: "",
+    practiceLetter: "",
+    practiceMode: "letter",
+    coverageStats: null,
+
+    // Notes & Sync States
+    currentNoteId: null,
+    lastNoteId: null,
+    clientSessionId: "session-" + Math.random().toString(36).substring(2, 9),
+    otherUsersStrokes: {},
+    isSyncing: false,
+    notesList: [],
+    datasetsList: [],
+    currentDatasetId: null,
+    currentDatasetTitle: "",
+};
+
+const AUTOSAVE_INTERVAL_MS = 30000;
+const AUTOSAVE_SESSION_STORAGE_KEY = "jannote_autosave_session_id";
+const autosaveRuntime = {
+    sessionId: "",
+    intervalId: null,
+    inFlight: false,
+    pendingBody: "",
+    lastSentBody: "",
 };
 
 const EASY_CONNECTED_WORDS = [
-    "the",
-    "be",
-    "of",
     "and",
-    "a",
-    "to",
-    "in",
     "he",
     "have",
-    "it",
-    "that",
-    "for",
-    "they",
-    "with",
     "as",
-    "not",
     "on",
     "she",
-    "at",
     "by",
-    "this",
     "we",
     "you",
     "do",
+    "or",
+    "one",
+    "would",
+    "all",
+    "say",
+    "who",
+    "when",
+    "can",
+    "more",
+    "no",
+    "man",
+    "so",
+    "up",
+    "go",
 ];
+
+const PRACTICE_LETTERS = "abcdefghijklmnopqrstuvwxyz".split("");
+
+function pickRandomDifferent(pool, previousValue) {
+    if (!pool || !pool.length) return "";
+    const options = pool.filter((v) => v !== previousValue);
+    const use = options.length ? options : pool;
+    return use[Math.floor(Math.random() * use.length)];
+}
+
+function pickRareLetter() {
+    const rareLetters = state.coverageStats?.rareLetters;
+    if (!Array.isArray(rareLetters) || !rareLetters.length) {
+        return pickRandomDifferent(PRACTICE_LETTERS, state.practiceLetter);
+    }
+
+    const counts = {};
+    for (const item of rareLetters) {
+        counts[item.letter] = item.count;
+    }
+
+    const complete = PRACTICE_LETTERS.map((letter) => ({
+        letter,
+        count: counts[letter] ?? 0,
+    })).sort((a, b) => a.count - b.count || a.letter.localeCompare(b.letter));
+
+    const topRare = complete.slice(0, Math.min(8, complete.length)).map((item) => item.letter);
+    return pickRandomDifferent(topRare, state.practiceLetter);
+}
+
+function pickRareWord() {
+    const rareWords = state.coverageStats?.rareWords;
+    if (!Array.isArray(rareWords) || !rareWords.length) {
+        return pickRandomDifferent(EASY_CONNECTED_WORDS, state.practiceWord);
+    }
+
+    const easySet = new Set(EASY_CONNECTED_WORDS.map((w) => w.toLowerCase()));
+    const candidateObjects = rareWords
+        .filter((item) => easySet.has(item.word) && item.word.length >= 2 && item.word.length <= 8)
+        .slice(0, 40);
+
+    if (!candidateObjects.length) {
+        return pickRandomDifferent(EASY_CONNECTED_WORDS, state.practiceWord);
+    }
+
+    const pool = candidateObjects.map((item) => item.word);
+    return pickRandomDifferent(pool, state.practiceWord);
+}
 
 function getAllStrokes() {
     const all = [];
@@ -281,7 +368,7 @@ function escapeHTML(str) {
 async function loadDictionary() {
     try {
         console.log("[Client] Loading words dictionary...");
-        const response = await fetch("/dictionary.txt");
+        const response = await fetch("/seamless_words.txt");
         if (response.ok) {
             const text = await response.text();
             const words = text
@@ -292,10 +379,27 @@ async function loadDictionary() {
             console.log(`[Client] Loaded ${state.dictionary.size} words into dictionary.`);
             updateRecognizedWords();
         } else {
-            console.warn("[Client] Failed to load dictionary.txt from server:", response.statusText);
+            console.warn("[Client] Failed to load seamless_words.txt from server:", response.statusText);
         }
     } catch (error) {
         console.error("Failed to load dictionary:", error);
+    }
+}
+
+async function loadCoveragePrompts() {
+    try {
+        const response = await fetch("/practice-prompts");
+        if (!response.ok) {
+            console.warn("[Client] Failed to load /practice-prompts:", response.statusText);
+            return;
+        }
+        const stats = await response.json();
+        state.coverageStats = stats;
+        console.log(
+            `[Client] Coverage prompts loaded. files=${stats.sourceFileCount}, words=${stats.uniqueWords}, letters=${stats.rareLetters?.length || 0}`,
+        );
+    } catch (error) {
+        console.warn("[Client] Coverage prompts unavailable:", error);
     }
 }
 
@@ -454,23 +558,178 @@ function updateRecognizedWords() {
         .join("");
 }
 
+function buildImportedItem(sample, currentOffset, labelValue) {
+    const rawSource = Array.isArray(sample.rawStrokes)
+        ? sample.rawStrokes
+        : Array.isArray(sample.normalizedStrokes)
+          ? sample.normalizedStrokes
+          : null;
+    if (!rawSource) {
+        return null;
+    }
+
+    // Find the min original time in the sample to calculate duration relative to offset
+    let sampleMinTime = Infinity;
+    let sampleMaxOrigTime = -Infinity;
+    for (const s of rawSource) {
+        const points = Array.isArray(s?.points) ? s.points : Array.isArray(s) ? s : [];
+        if (points.length) {
+            for (let idx = 0; idx < points.length; idx++) {
+                const pt = points[idx];
+                const timeValue = Number.isFinite(pt.time) ? pt.time : idx;
+                if (timeValue < sampleMinTime) sampleMinTime = timeValue;
+                if (timeValue > sampleMaxOrigTime) sampleMaxOrigTime = timeValue;
+            }
+        }
+    }
+    if (sampleMinTime === Infinity) {
+        sampleMinTime = 0;
+        sampleMaxOrigTime = 0;
+    }
+
+    const sampleDuration = sampleMaxOrigTime - sampleMinTime;
+
+    // Construct finalized strokes for this sample
+    const sampleStrokes = rawSource.map((rawStroke) => {
+        let strokeMinTime = Infinity;
+        let strokeMaxTime = -Infinity;
+
+        const rawPoints = Array.isArray(rawStroke?.points) ? rawStroke.points : Array.isArray(rawStroke) ? rawStroke : [];
+        const points = rawPoints.map((pt, idx) => {
+            const timeValue = Number.isFinite(pt.time) ? pt.time : idx;
+            const adjustedTime = timeValue - sampleMinTime + currentOffset;
+            strokeMinTime = Math.min(strokeMinTime, adjustedTime);
+            strokeMaxTime = Math.max(strokeMaxTime, adjustedTime);
+            return {
+                x: pt.x,
+                y: pt.y,
+                time: adjustedTime,
+            };
+        });
+
+        if (strokeMinTime === Infinity) {
+            strokeMinTime = currentOffset;
+            strokeMaxTime = currentOffset;
+        }
+
+        return {
+            label: labelValue || "",
+            startedAt: strokeMinTime,
+            completedAt: strokeMaxTime,
+            points: points,
+            isFinalized: true,
+        };
+    });
+
+    // Calculate bounding box for this sample
+    let minX = Infinity,
+        minY = Infinity,
+        maxX = -Infinity,
+        maxY = -Infinity;
+    for (const s of sampleStrokes) {
+        const b = getStrokeBounds(s);
+        minX = Math.min(minX, b.minX);
+        minY = Math.min(minY, b.minY);
+        maxX = Math.max(maxX, b.maxX);
+        maxY = Math.max(maxY, b.maxY);
+    }
+
+    const bounds = {
+        minX,
+        minY,
+        maxX,
+        maxY,
+        width: maxX - minX,
+        height: maxY - minY,
+    };
+
+    return {
+        duration: sampleDuration,
+        strokes: sampleStrokes,
+        bounds,
+    };
+}
+
 function setStatus(message) {
     statusText.textContent = message;
 }
 
+function setContinuousMode(enabled) {
+    state.continuousMode = enabled;
+    if (continuousModeCheckbox) {
+        continuousModeCheckbox.checked = enabled;
+    }
+}
+
 function pickNextPracticeWord() {
-    if (!EASY_CONNECTED_WORDS.length) return;
-    const options = EASY_CONNECTED_WORDS.filter((w) => w !== state.practiceWord);
-    const pool = options.length ? options : EASY_CONNECTED_WORDS;
-    const word = pool[Math.floor(Math.random() * pool.length)];
+    if (state.workspaceMode !== "dataset" || !EASY_CONNECTED_WORDS.length) return;
+
+    state.practiceMode = state.practiceMode === "word" ? "letter" : "word";
+
+    if (state.practiceMode === "letter") {
+        setContinuousMode(false);
+        const letter = pickRareLetter();
+        state.practiceLetter = letter;
+        if (practiceWordText) {
+            const count = state.coverageStats?.rareLetters?.find((x) => x.letter === letter)?.count;
+            const suffix = Number.isFinite(count) ? ` (count: ${count})` : "";
+            practiceWordText.textContent = `Practice letter: ${letter}${suffix}`;
+        }
+        if (strokeLabelInput) {
+            strokeLabelInput.value = letter;
+        }
+        setActiveLabel(letter);
+        setStatus(`Practice prompt ready: "${letter}". Draw a single letter and lift to finalize.`);
+        return;
+    }
+
+    setContinuousMode(true);
+    const word = pickRareWord();
     state.practiceWord = word;
     if (practiceWordText) {
-        practiceWordText.textContent = `Practice word: ${word}`;
+        const count = state.coverageStats?.rareWords?.find((x) => x.word === word)?.count;
+        const suffix = Number.isFinite(count) ? ` (count: ${count})` : "";
+        practiceWordText.textContent = `Practice word: ${word}${suffix}`;
     }
     if (strokeLabelInput) {
         strokeLabelInput.value = word;
     }
     setStatus(`Practice prompt ready: "${word}". Write it in one connected stroke sequence, then Commit Word.`);
+}
+
+function updatePredictionBadge(data) {
+    if (!predictionBadge) return;
+    if (!data || data.mode !== "hybrid") {
+        predictionBadge.classList.add("hidden");
+        predictionBadge.classList.remove("is-muted");
+        predictionBadge.textContent = "";
+        return;
+    }
+
+    let text = "";
+    let muted = false;
+    if (data.charUsed === false) {
+        const reason = (data.charIgnoredReason || "char-ignored").replace(/-/g, " ");
+        text = `Char ignored: ${reason}`;
+        muted = true;
+    } else if (data.decision === "agree") {
+        text = "Models agree";
+    } else if (data.decision === "sequence") {
+        text = "Sequence chosen";
+    } else if (data.decision === "char") {
+        text = "Char chosen";
+    }
+
+    if (!text) {
+        predictionBadge.classList.add("hidden");
+        predictionBadge.classList.remove("is-muted");
+        predictionBadge.textContent = "";
+        return;
+    }
+
+    predictionBadge.textContent = text;
+    predictionBadge.classList.toggle("is-muted", muted);
+    predictionBadge.classList.remove("hidden");
 }
 
 function redraw(activeTime = null) {
@@ -603,9 +862,35 @@ function redraw(activeTime = null) {
     if (state.currentStroke) {
         drawStroke(state.currentStroke, activeTime);
     }
+
+    // 4. Draw other users' active drawing strokes
+    if (state.otherUsersStrokes) {
+        for (const sessionId in state.otherUsersStrokes) {
+            const data = state.otherUsersStrokes[sessionId];
+            const color = getUserColor(sessionId);
+            if (data.strokes) {
+                for (const stroke of data.strokes) {
+                    drawStroke(stroke, activeTime, color);
+                }
+            }
+            if (data.currentStroke) {
+                drawStroke(data.currentStroke, activeTime, color);
+            }
+        }
+    }
 }
 
-function drawStroke(stroke, activeTime) {
+const USER_COLORS = ["#a855f7", "#ec4899", "#f59e0b", "#10b981", "#ef4444", "#3b82f6"];
+function getUserColor(sessionId) {
+    let hash = 0;
+    for (let i = 0; i < sessionId.length; i++) {
+        hash = sessionId.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const idx = Math.abs(hash) % USER_COLORS.length;
+    return USER_COLORS[idx];
+}
+
+function drawStroke(stroke, activeTime, color) {
     const points = stroke.points;
     if (points.length === 0) {
         return;
@@ -624,7 +909,10 @@ function drawStroke(stroke, activeTime) {
     context.save();
 
     // Customize stroke colors based on labeling
-    if (state.mode === "label" && stroke.label) {
+    if (color) {
+        context.strokeStyle = color;
+        context.shadowColor = color + "40"; // neon transparent shadow
+    } else if (state.mode === "label" && stroke.label) {
         context.strokeStyle = "#34d399"; // emerald green
         context.shadowColor = "rgba(52, 211, 153, 0.4)";
     } else {
@@ -764,7 +1052,7 @@ function finishStroke() {
         state.finalizationTimer = setTimeout(finalizeCurrentLetter, delayMs);
     }
 
-    if (!state.predictMode) {
+    if (!state.predictMode || state.workspaceMode !== "dataset") {
         clearPredictionDisplay();
     }
 }
@@ -888,6 +1176,7 @@ function handleLabelClick(event) {
             redraw();
             updateStats();
             updateRecognizedWords();
+            pushLabelsToServer();
             return;
         }
 
@@ -905,6 +1194,20 @@ function handleLabelClick(event) {
         redraw();
         updateStats();
         updateRecognizedWords();
+        pushLabelsToServer();
+    }
+}
+
+function pushLabelsToServer() {
+    if (state.currentNoteId) {
+        fetch(`/api/notes/${state.currentNoteId}/update-labels`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                finalizedLetters: state.finalizedLetters,
+                finalizedWords: state.finalizedWords,
+            }),
+        }).catch((err) => console.error("Failed to update labels on server:", err));
     }
 }
 
@@ -999,6 +1302,12 @@ function clearCanvas() {
     redraw();
     clearPredictionDisplay();
     updateRecognizedWords();
+
+    if (state.currentNoteId) {
+        fetch(`/api/notes/${state.currentNoteId}/clear`, { method: "POST" }).catch((err) =>
+            console.error("Failed to clear note on server:", err),
+        );
+    }
 }
 
 function stopReplay() {
@@ -1100,10 +1409,27 @@ function syncSpeed() {
     speedValue.textContent = `${state.speed.toFixed(1)}x`;
 }
 
-// Mode switching function
 function setMode(newMode) {
-    state.mode = newMode;
-    if (newMode === "draw") {
+    const isDataset = state.workspaceMode === "dataset";
+    state.mode = isDataset ? newMode : "draw";
+    const isLabelMode = isDataset && newMode === "label";
+
+    if (!isDataset) {
+        drawModeBtn.classList.add("active");
+        labelModeBtn.classList.remove("active");
+        drawControls.classList.remove("hidden");
+        labelControls.classList.add("hidden");
+        drawingStats.classList.remove("hidden");
+        datasetStats.classList.add("hidden");
+        document.body.classList.remove("mode-label");
+        canvasTip.textContent = "Use a pen, stylus, mouse, or touch input.";
+        setStatus("Ready to draw");
+        redraw();
+        updateStats();
+        return;
+    }
+
+    if (!isLabelMode) {
         drawModeBtn.classList.add("active");
         labelModeBtn.classList.remove("active");
         drawControls.classList.remove("hidden");
@@ -1131,6 +1457,110 @@ function setMode(newMode) {
     updateStats();
 }
 
+function stopNoteSyncPolling() {
+    if (syncPollInterval) {
+        clearInterval(syncPollInterval);
+        syncPollInterval = null;
+    }
+}
+
+function setWorkspaceMode(newMode, { force = false } = {}) {
+    if (!force && state.workspaceMode === newMode) return;
+    state.workspaceMode = newMode;
+
+    const isDataset = newMode === "dataset";
+    notesModeBtn.classList.toggle("active", !isDataset);
+    datasetModeBtn.classList.toggle("active", isDataset);
+
+    if (labelPracticeRow) {
+        labelPracticeRow.classList.toggle("hidden", !isDataset);
+    }
+    if (datasetSubModeToggle) {
+        datasetSubModeToggle.classList.toggle("hidden", !isDataset);
+    }
+    if (datasetSubModeDivider) {
+        datasetSubModeDivider.classList.toggle("hidden", !isDataset);
+    }
+    if (predictionCard) {
+        predictionCard.classList.toggle("hidden", !isDataset);
+    }
+    if (recognizedWordsPanel) {
+        recognizedWordsPanel.classList.toggle("hidden", !isDataset);
+    }
+
+    const predictToggle = predictCheckbox ? predictCheckbox.closest("label") : null;
+    if (predictToggle) {
+        predictToggle.classList.toggle("hidden", !isDataset);
+    }
+    const continuousToggle = continuousModeCheckbox ? continuousModeCheckbox.closest("label") : null;
+    if (continuousToggle) {
+        continuousToggle.classList.toggle("hidden", !isDataset);
+    }
+    if (commitWordBtn) {
+        commitWordBtn.classList.toggle("hidden", !isDataset);
+    }
+    if (nextPracticeWordBtn) {
+        nextPracticeWordBtn.classList.toggle("hidden", !isDataset);
+    }
+    if (practiceWordText) {
+        practiceWordText.classList.toggle("hidden", !isDataset);
+    }
+
+    if (newNoteBtn) {
+        newNoteBtn.textContent = isDataset ? "+ New Dataset" : "+ New Note";
+    }
+    if (noteTitleLabel) {
+        noteTitleLabel.textContent = isDataset ? "Dataset Title" : "Note Title";
+    }
+    if (noteTitleInput) {
+        noteTitleInput.placeholder = isDataset ? "Untitled Dataset" : "Untitled Note";
+        noteTitleInput.disabled = isDataset;
+        if (isDataset) {
+            noteTitleInput.value = "";
+        }
+    }
+
+    if (!isDataset) {
+        state.predictMode = false;
+        if (predictCheckbox) predictCheckbox.checked = false;
+        setContinuousMode(false);
+        clearPredictionDisplay();
+        if (strokeLabelInput) {
+            strokeLabelInput.value = "";
+        }
+        setMode("draw");
+        if (state.lastNoteId) {
+            const restoreNoteId = state.lastNoteId;
+            state.lastNoteId = null;
+            loadNotesList().finally(() => {
+                selectNote(restoreNoteId);
+            });
+        } else {
+            loadNotesList();
+        }
+        return;
+    }
+
+    stopNoteSyncPolling();
+    if (state.currentNoteId) {
+        state.lastNoteId = state.currentNoteId;
+    }
+    state.currentNoteId = null;
+    state.otherUsersStrokes = {};
+    setSyncStatus("saved");
+    if (predictCheckbox) {
+        predictCheckbox.checked = true;
+        state.predictMode = true;
+    }
+    loadModel();
+    loadDictionary();
+    loadCoveragePrompts().finally(() => {
+        pickNextPracticeWord();
+    });
+    loadDatasetsList();
+    setMode(state.mode || "draw");
+}
+
 function setActiveLabel(newLabel) {
     const clean = newLabel.trim();
     if (clean === "") return;
@@ -1150,6 +1580,164 @@ function setActiveLabel(newLabel) {
         canvasTip.textContent = `Click strokes to label them as '${state.activeLabel}'.`;
         setStatus(`Labeling mode (Active: '${state.activeLabel}')`);
     }
+}
+
+function createAutosaveSessionId() {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID();
+    }
+    return `session_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+}
+
+function createDatasetId() {
+    return `dataset-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+}
+
+function getAutosaveSessionId(datasetId) {
+    if (!datasetId) {
+        return "";
+    }
+    const storageKey = `${AUTOSAVE_SESSION_STORAGE_KEY}:${datasetId}`;
+    try {
+        const stored = localStorage.getItem(storageKey);
+        if (stored) return stored;
+        const created = createAutosaveSessionId();
+        localStorage.setItem(storageKey, created);
+        return created;
+    } catch (error) {
+        console.warn("[Autosave] localStorage unavailable, using ephemeral session ID.", error);
+        return createAutosaveSessionId();
+    }
+}
+
+function setDatasetMeta({ id, title } = {}) {
+    if (id) {
+        state.currentDatasetId = id;
+    }
+    if (typeof title === "string") {
+        state.currentDatasetTitle = title || "Untitled Dataset";
+    }
+    if (noteTitleInput) {
+        noteTitleInput.value = state.currentDatasetTitle || "";
+    }
+    refreshAutosaveSessionId();
+}
+
+function refreshAutosaveSessionId() {
+    const newSessionId = getAutosaveSessionId(state.currentDatasetId);
+    if (!newSessionId) {
+        autosaveRuntime.sessionId = "";
+        return;
+    }
+    if (autosaveRuntime.sessionId !== newSessionId) {
+        autosaveRuntime.sessionId = newSessionId;
+        autosaveRuntime.pendingBody = "";
+        autosaveRuntime.lastSentBody = "";
+    }
+}
+
+function buildAutosaveDataset() {
+    const dataset = compileDataset();
+    const labeledSamples = (dataset.samples || []).filter((sample) => String(sample?.label || "").trim());
+    const labeledSequenceSamples = (dataset.sequenceSamples || []).filter((sample) => String(sample?.text || "").trim());
+
+    return {
+        metadata: {
+            ...(dataset.metadata || {}),
+            datasetId: state.currentDatasetId || "",
+            title: state.currentDatasetTitle || "",
+            autosave: true,
+            totalSamples: labeledSamples.length,
+            totalSequenceSamples: labeledSequenceSamples.length,
+        },
+        samples: labeledSamples,
+        sequenceSamples: labeledSequenceSamples,
+    };
+}
+
+async function sendAutosaveBody(body) {
+    autosaveRuntime.inFlight = true;
+    try {
+        const response = await fetch("/autosave-dataset", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body,
+        });
+        if (!response.ok) {
+            throw new Error(`Autosave failed (${response.status})`);
+        }
+        autosaveRuntime.lastSentBody = body;
+    } catch (error) {
+        console.warn("[Autosave] Failed to sync labeled dataset:", error);
+    } finally {
+        autosaveRuntime.inFlight = false;
+        if (autosaveRuntime.pendingBody && autosaveRuntime.pendingBody !== autosaveRuntime.lastSentBody) {
+            const nextBody = autosaveRuntime.pendingBody;
+            autosaveRuntime.pendingBody = "";
+            sendAutosaveBody(nextBody);
+        } else {
+            autosaveRuntime.pendingBody = "";
+        }
+    }
+}
+
+function triggerAutosave({ force = false, useBeacon = false } = {}) {
+    if (state.workspaceMode !== "dataset") {
+        return;
+    }
+    if (!state.currentDatasetId) {
+        return;
+    }
+    if (!autosaveRuntime.sessionId) {
+        return;
+    }
+
+    const dataset = buildAutosaveDataset();
+    if (!dataset.samples.length && !dataset.sequenceSamples.length) {
+        return;
+    }
+
+    const body = JSON.stringify({
+        sessionId: autosaveRuntime.sessionId,
+        datasetId: state.currentDatasetId,
+        datasetTitle: state.currentDatasetTitle || "",
+        dataset,
+    });
+
+    if (!force && body === autosaveRuntime.lastSentBody) {
+        return;
+    }
+
+    if (useBeacon && typeof navigator.sendBeacon === "function") {
+        const sent = navigator.sendBeacon("/autosave-dataset", new Blob([body], { type: "application/json" }));
+        if (sent) {
+            autosaveRuntime.lastSentBody = body;
+        }
+        return;
+    }
+
+    if (autosaveRuntime.inFlight) {
+        autosaveRuntime.pendingBody = body;
+        return;
+    }
+
+    sendAutosaveBody(body);
+}
+
+function initializeAutosave() {
+    refreshAutosaveSessionId();
+    if (autosaveRuntime.intervalId) {
+        clearInterval(autosaveRuntime.intervalId);
+    }
+    autosaveRuntime.intervalId = setInterval(() => {
+        triggerAutosave();
+    }, AUTOSAVE_INTERVAL_MS);
+
+    const flushAutosave = () => triggerAutosave({ force: true, useBeacon: true });
+    window.addEventListener("pagehide", flushAutosave);
+    window.addEventListener("beforeunload", flushAutosave);
 }
 
 // Grouping and normalization logic for dataset export
@@ -1251,6 +1839,8 @@ function compileDataset() {
             totalSequenceSamples: sequenceSamples.length,
             canvasWidth: canvas.width / (window.devicePixelRatio || 1),
             canvasHeight: canvas.height / (window.devicePixelRatio || 1),
+            datasetId: state.currentDatasetId || "",
+            title: state.currentDatasetTitle || "",
         },
         samples: processedSamples,
         sequenceSamples: sequenceSamples,
@@ -1294,7 +1884,7 @@ function normalizeStrokes(strokes) {
 
 // Keyboard shortcuts for Label Mode
 window.addEventListener("keydown", (event) => {
-    if (state.mode !== "label") return;
+    if (state.workspaceMode !== "dataset" || state.mode !== "label") return;
 
     if (document.activeElement === activeLabelInput) {
         if (event.key === "Enter") {
@@ -1323,6 +1913,8 @@ pauseButton.addEventListener("click", togglePause);
 speedRange.addEventListener("input", syncSpeed);
 
 // Mode selectors
+notesModeBtn.addEventListener("click", () => setWorkspaceMode("notes"));
+datasetModeBtn.addEventListener("click", () => setWorkspaceMode("dataset"));
 drawModeBtn.addEventListener("click", () => setMode("draw"));
 labelModeBtn.addEventListener("click", () => setMode("label"));
 
@@ -1361,10 +1953,15 @@ clearLabelsBtn.addEventListener("click", () => {
         redraw();
         updateStats();
         updateRecognizedWords();
+        pushLabelsToServer();
     }
 });
 
 exportDatasetBtn.addEventListener("click", () => {
+    if (state.workspaceMode !== "dataset") {
+        alert("Switch to Dataset mode to export datasets.");
+        return;
+    }
     const dataset = compileDataset();
     if (dataset.metadata.totalStrokes === 0) {
         alert("Please draw something before exporting.");
@@ -1382,6 +1979,9 @@ exportDatasetBtn.addEventListener("click", () => {
 });
 
 importDatasetBtn.addEventListener("click", () => {
+    if (state.workspaceMode !== "dataset") {
+        setWorkspaceMode("dataset");
+    }
     importDatasetFile.click();
 });
 
@@ -1393,11 +1993,12 @@ importDatasetFile.addEventListener("change", (event) => {
     reader.onload = (e) => {
         try {
             const data = JSON.parse(e.target.result);
-            if (!data || !Array.isArray(data.samples)) {
+            if (!data || (!Array.isArray(data.samples) && !Array.isArray(data.sequenceSamples))) {
                 alert("Invalid dataset format: missing 'samples' array.");
                 return;
             }
-            importDataset(data);
+            const inferredTitle = data?.metadata?.title || file.name.replace(/\.json$/i, "");
+            importDataset(data, { datasetId: createDatasetId(), datasetTitle: inferredTitle, source: "import" });
         } catch (err) {
             console.error("Failed to parse JSON file:", err);
             alert("Failed to parse JSON file. Please ensure it is a valid exported dataset.");
@@ -1408,7 +2009,19 @@ importDatasetFile.addEventListener("change", (event) => {
     reader.readAsText(file);
 });
 
-function importDataset(data) {
+function importDataset(data, { datasetId, datasetTitle, source } = {}) {
+    if (state.workspaceMode !== "dataset") {
+        setWorkspaceMode("dataset");
+    }
+    const resolvedId = datasetId || data?.metadata?.datasetId || state.currentDatasetId || createDatasetId();
+    const resolvedTitle = datasetTitle || data?.metadata?.title || "Untitled Dataset";
+    setDatasetMeta({ id: resolvedId, title: resolvedTitle });
+    upsertDatasetListItem({
+        id: resolvedId,
+        title: resolvedTitle,
+        updatedAt: Date.now(),
+        source: source || "autosave",
+    });
     if (state.finalizationTimer) {
         clearTimeout(state.finalizationTimer);
         state.finalizationTimer = null;
@@ -1432,95 +2045,54 @@ function importDataset(data) {
     let currentOffset = 500;
     let maxTime = 0;
 
-    for (const sample of data.samples) {
-        if (!sample.rawStrokes || !Array.isArray(sample.rawStrokes)) {
+    const samples = Array.isArray(data.samples) ? data.samples : [];
+    for (const sample of samples) {
+        const imported = buildImportedItem(sample, currentOffset, sample.label || "");
+        if (!imported) {
             continue;
         }
 
-        // Find the min original time in the sample to calculate duration relative to offset
-        let sampleMinTime = Infinity;
-        let sampleMaxOrigTime = -Infinity;
-        for (const s of sample.rawStrokes) {
-            if (s.points && Array.isArray(s.points)) {
-                for (const pt of s.points) {
-                    if (pt.time < sampleMinTime) sampleMinTime = pt.time;
-                    if (pt.time > sampleMaxOrigTime) sampleMaxOrigTime = pt.time;
-                }
-            }
-        }
-        if (sampleMinTime === Infinity) {
-            sampleMinTime = 0;
-            sampleMaxOrigTime = 0;
-        }
-
-        const sampleDuration = sampleMaxOrigTime - sampleMinTime;
-
-        // Construct finalized strokes for this sample
-        const sampleStrokes = sample.rawStrokes.map((rawStroke) => {
-            let strokeMinTime = Infinity;
-            let strokeMaxTime = -Infinity;
-
-            const points = (rawStroke.points || []).map((pt) => {
-                const adjustedTime = pt.time - sampleMinTime + currentOffset;
-                strokeMinTime = Math.min(strokeMinTime, adjustedTime);
-                strokeMaxTime = Math.max(strokeMaxTime, adjustedTime);
-                return {
-                    x: pt.x,
-                    y: pt.y,
-                    time: adjustedTime,
-                };
-            });
-
-            if (strokeMinTime === Infinity) {
-                strokeMinTime = currentOffset;
-                strokeMaxTime = currentOffset;
-            }
-
-            maxTime = Math.max(maxTime, strokeMaxTime);
-
-            return {
-                label: sample.label || "",
-                startedAt: strokeMinTime,
-                completedAt: strokeMaxTime,
-                points: points,
-                isFinalized: true,
-            };
-        });
-
-        // Calculate bounding box for this sample
-        let minX = Infinity,
-            minY = Infinity,
-            maxX = -Infinity,
-            maxY = -Infinity;
-        for (const s of sampleStrokes) {
-            const b = getStrokeBounds(s);
-            minX = Math.min(minX, b.minX);
-            minY = Math.min(minY, b.minY);
-            maxX = Math.max(maxX, b.maxX);
-            maxY = Math.max(maxY, b.maxY);
-        }
-
-        const bounds = {
-            minX,
-            minY,
-            maxX,
-            maxY,
-            width: maxX - minX,
-            height: maxY - minY,
-        };
-
-        const letterObj = {
+        state.finalizedLetters.push({
             prediction: sample.label || "?",
             confidence: sample.label ? 1.0 : 0.0,
-            bounds: bounds,
-            strokes: sampleStrokes,
+            bounds: imported.bounds,
+            strokes: imported.strokes,
             label: sample.label || "",
-        };
+        });
 
-        state.finalizedLetters.push(letterObj);
+        maxTime = Math.max(maxTime, imported.strokes[imported.strokes.length - 1]?.completedAt || currentOffset);
+        currentOffset += imported.duration + 1000;
+    }
 
-        // Advance currentOffset for the next letter
-        currentOffset += sampleDuration + 1000;
+    const sequenceSamples = Array.isArray(data.sequenceSamples) ? data.sequenceSamples : [];
+    for (const sample of sequenceSamples) {
+        const textLabel = (sample.text || "").trim();
+        const imported = buildImportedItem(sample, currentOffset, textLabel);
+        if (!imported) {
+            continue;
+        }
+
+        state.finalizedWords.push({
+            id: sample.id || `W-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+            label: textLabel,
+            prediction: textLabel || "?",
+            confidence: textLabel ? 1.0 : 0.0,
+            bounds: imported.bounds,
+            strokes: imported.strokes,
+            letterSpans: Array.isArray(sample.letterSpans) ? sample.letterSpans : [],
+            usedTimesteps: sample.usedTimesteps || 0,
+            sequencePrediction: textLabel || "?",
+            sequenceConfidence: textLabel ? 1.0 : 0.0,
+            charPrediction: textLabel || "?",
+            charConfidence: textLabel ? 1.0 : 0.0,
+            charUsed: true,
+            charIgnoredReason: "",
+            segmentCount: 0,
+            expectedCharCount: textLabel.replace(/\s+/g, "").length,
+        });
+
+        maxTime = Math.max(maxTime, imported.strokes[imported.strokes.length - 1]?.completedAt || currentOffset);
+        currentOffset += imported.duration + 1000;
     }
 
     // Set chronological variables so new strokes are appended at the end
@@ -1546,7 +2118,8 @@ function importDataset(data) {
     // Automatically switch to Label mode to look at/label the imported characters
     setMode("label");
 
-    setStatus(`Imported ${state.finalizedLetters.length} sample${state.finalizedLetters.length === 1 ? "" : "s"}`);
+    const totalImported = state.finalizedLetters.length + state.finalizedWords.length;
+    setStatus(`Imported ${totalImported} item${totalImported === 1 ? "" : "s"}`);
 
     redraw();
     updateStats();
@@ -1556,8 +2129,24 @@ function importDataset(data) {
     predictFinalizedLetters(state.finalizedLetters);
 }
 
+function createNewDataset() {
+    const newId = createDatasetId();
+    const title = "Untitled Dataset";
+    setDatasetMeta({ id: newId, title });
+    upsertDatasetListItem({
+        id: newId,
+        title,
+        updatedAt: Date.now(),
+        source: "autosave",
+    });
+    clearCanvas();
+    setMode("draw");
+    pickNextPracticeWord();
+    setStatus("New dataset ready");
+}
+
 async function predictFinalizedLetters(letters) {
-    if (!state.modelTrained) return;
+    if (!state.modelTrained || state.workspaceMode !== "dataset") return;
 
     for (const letter of letters) {
         if (!letter.label) {
@@ -1608,6 +2197,7 @@ function clearPredictionDisplay() {
     if (predictionConfidenceBar) {
         predictionConfidenceBar.style.width = "0%";
     }
+    updatePredictionBadge(null);
 }
 
 async function finalizeCurrentWord() {
@@ -1634,6 +2224,7 @@ async function finalizeCurrentWord() {
     }
 
     const newWord = {
+        id: "W-" + Date.now() + "-" + Math.random().toString(36).substring(2, 9),
         label: wordLabel,
         prediction: "?",
         confidence: 0,
@@ -1644,6 +2235,14 @@ async function finalizeCurrentWord() {
     };
     state.finalizedWords.push(newWord);
 
+    if (state.currentNoteId) {
+        fetch(`/api/notes/${state.currentNoteId}/finalize-word`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ word: newWord }),
+        }).catch((err) => console.error("Failed to push finalized word:", err));
+    }
+
     state.totalCharacters += wordLabel.replace(/\s+/g, "").length;
     state.strokes = [];
     strokeLabelInput.value = "";
@@ -1653,7 +2252,7 @@ async function finalizeCurrentWord() {
     updateRecognizedWords();
     pickNextPracticeWord();
 
-    if (!state.predictMode) {
+    if (!state.predictMode || state.workspaceMode !== "dataset") {
         return;
     }
 
@@ -1671,7 +2270,7 @@ async function finalizeCurrentWord() {
 
         if (seqPoints.length === 0) return;
 
-        const response = await fetch("/predict-sequence", {
+        const response = await fetch("/predict-hybrid", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -1687,6 +2286,28 @@ async function finalizeCurrentWord() {
         newWord.confidence = data.confidence || 0;
         newWord.letterSpans = Array.isArray(data.letterSpans) ? data.letterSpans : [];
         newWord.usedTimesteps = data.usedTimesteps || 0;
+        newWord.sequencePrediction = data.sequencePrediction || "?";
+        newWord.sequenceConfidence = data.sequenceConfidence || 0;
+        newWord.charPrediction = data.charPrediction || "?";
+        newWord.charConfidence = data.charConfidence || 0;
+        newWord.charUsed = data.charUsed !== false;
+        newWord.charIgnoredReason = data.charIgnoredReason || "";
+        newWord.segmentCount = data.segmentCount || 0;
+        newWord.expectedCharCount = data.expectedCharCount || 0;
+
+        if (state.currentNoteId) {
+            fetch(`/api/notes/${state.currentNoteId}/update-word-prediction`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    wordId: newWord.id,
+                    prediction: data.prediction || "?",
+                    confidence: data.confidence || 0,
+                    letterSpans: data.letterSpans || [],
+                    usedTimesteps: data.usedTimesteps || 0,
+                }),
+            }).catch((err) => console.error("Failed to update word prediction on server:", err));
+        }
 
         const confidence = Math.round((data.confidence || 0) * 100);
         if (predictionText) {
@@ -1698,6 +2319,7 @@ async function finalizeCurrentWord() {
         if (predictionConfidenceBar) {
             predictionConfidenceBar.style.width = `${confidence}%`;
         }
+        updatePredictionBadge(data);
         redraw();
         updateRecognizedWords();
     } catch (error) {
@@ -1741,6 +2363,7 @@ async function finalizeCurrentLetter() {
 
     // Add finalized letter with placeholder prediction to avoid visual flicker during fetch
     const newLetter = {
+        id: "L-" + Date.now() + "-" + Math.random().toString(36).substring(2, 9),
         prediction: "?",
         confidence: 0,
         bounds: bounds,
@@ -1749,13 +2372,21 @@ async function finalizeCurrentLetter() {
     };
     state.finalizedLetters.push(newLetter);
 
+    if (state.currentNoteId) {
+        fetch(`/api/notes/${state.currentNoteId}/finalize-letter`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ letter: newLetter }),
+        }).catch((err) => console.error("Failed to push finalized letter:", err));
+    }
+
     // Clear active strokes so the next drawing is a new letter
     state.strokes = [];
     updateStats();
     redraw();
     updateRecognizedWords();
 
-    if (!state.predictMode) {
+    if (!state.predictMode || state.workspaceMode !== "dataset") {
         return;
     }
 
@@ -1803,6 +2434,18 @@ async function finalizeCurrentLetter() {
         newLetter.prediction = predictedChar;
         newLetter.confidence = data.confidence;
 
+        if (state.currentNoteId) {
+            fetch(`/api/notes/${state.currentNoteId}/update-letter-prediction`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    letterId: newLetter.id,
+                    prediction: predictedChar,
+                    confidence: data.confidence,
+                }),
+            }).catch((err) => console.error("Failed to update letter prediction on server:", err));
+        }
+
         // Update the prediction display card for visual feedback
         if (predictionText) {
             predictionText.textContent = predictedChar;
@@ -1813,15 +2456,28 @@ async function finalizeCurrentLetter() {
         if (predictionConfidenceBar) {
             predictionConfidenceBar.style.width = `${confidence}%`;
         }
+        updatePredictionBadge(null);
     } catch (error) {
         console.error("Failed to finalize letter prediction:", error);
     }
 
     redraw();
     updateRecognizedWords();
+
+    if (state.practiceMode === "letter" && initialLabel === state.practiceLetter) {
+        pickNextPracticeWord();
+    }
 }
 
 async function runInference() {
+    if (state.workspaceMode !== "dataset") {
+        clearPredictionDisplay();
+        return;
+    }
+    if (!state.predictMode) {
+        clearPredictionDisplay();
+        return;
+    }
     if (!state.strokes.length) {
         clearPredictionDisplay();
         return;
@@ -1889,6 +2545,7 @@ async function runInference() {
         if (predictionConfidenceBar) {
             predictionConfidenceBar.style.width = `${confidence}%`;
         }
+        updatePredictionBadge(null);
     } catch (error) {
         console.error("Inference fetch failed:", error);
     }
@@ -1924,6 +2581,12 @@ async function loadModel() {
 
 if (predictCheckbox) {
     predictCheckbox.addEventListener("change", () => {
+        if (state.workspaceMode !== "dataset") {
+            predictCheckbox.checked = false;
+            state.predictMode = false;
+            clearPredictionDisplay();
+            return;
+        }
         state.predictMode = predictCheckbox.checked;
         if (state.predictMode) {
             runInference();
@@ -1935,6 +2598,11 @@ if (predictCheckbox) {
 
 if (continuousModeCheckbox) {
     continuousModeCheckbox.addEventListener("change", () => {
+        if (state.workspaceMode !== "dataset") {
+            continuousModeCheckbox.checked = false;
+            state.continuousMode = false;
+            return;
+        }
         state.continuousMode = continuousModeCheckbox.checked;
         if (state.continuousMode) {
             setStatus("Continuous script mode ON. Draw connected writing, then click Commit Word.");
@@ -1958,9 +2626,354 @@ if (nextPracticeWordBtn) {
 
 window.addEventListener("resize", resizeCanvas);
 
+// ==========================================
+// NOTE MANAGEMENT & SYNCHRONIZATION LOGIC
+// ==========================================
+
+let syncPollInterval = null;
+
+function setSyncStatus(status) {
+    if (!syncStatusElement) return;
+    syncStatusElement.className = `sync-status ${status}`;
+    syncStatusElement.textContent = status === "saved" ? "Saved" : status === "syncing" ? "Syncing" : "Offline";
+}
+
+async function loadNotesList() {
+    if (state.workspaceMode !== "notes") return;
+    try {
+        const response = await fetch("/api/notes");
+        if (!response.ok) throw new Error("Failed to fetch notes list");
+        const notes = await response.json();
+        state.notesList = notes;
+        renderNotesList();
+
+        // Auto-select first note if none selected, or if current note was deleted
+        if (notes.length > 0) {
+            const currentExists = notes.some((n) => n.id === state.currentNoteId);
+            if (!state.currentNoteId || !currentExists) {
+                selectNote(notes[0].id);
+            }
+        } else {
+            // No notes exist, create one
+            createNewNote();
+        }
+    } catch (err) {
+        console.error("Failed to load notes:", err);
+        setSyncStatus("offline");
+    }
+}
+
+async function loadDatasetsList() {
+    if (state.workspaceMode !== "dataset") return;
+    try {
+        const response = await fetch("/api/datasets");
+        if (!response.ok) throw new Error("Failed to fetch datasets list");
+        const datasets = await response.json();
+        state.datasetsList = datasets;
+        renderDatasetsList();
+
+        if (datasets.length > 0) {
+            const currentExists = datasets.some((d) => d.id === state.currentDatasetId);
+            if (!state.currentDatasetId || !currentExists) {
+                selectDataset(datasets[0].id);
+            }
+        } else {
+            createNewDataset();
+        }
+    } catch (err) {
+        console.error("Failed to load datasets:", err);
+        setSyncStatus("offline");
+    }
+}
+
+function renderNotesList() {
+    if (!notesListContainer) return;
+    notesListContainer.innerHTML = "";
+
+    state.notesList.forEach((note) => {
+        const dateStr = new Date(note.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const isActive = note.id === state.currentNoteId;
+
+        const noteItem = document.createElement("div");
+        noteItem.className = `note-item ${isActive ? "active" : ""}`;
+        noteItem.dataset.id = note.id;
+
+        noteItem.innerHTML = `
+            <div class="note-item-info">
+                <span class="note-item-title">${escapeHTML(note.title || "Untitled Note")}</span>
+                <span class="note-item-date">Updated: ${dateStr}</span>
+            </div>
+            <button class="note-delete-btn" title="Delete Note">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3 6 5 6 21 6"></polyline>
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                </svg>
+            </button>
+        `;
+
+        noteItem.addEventListener("click", (e) => {
+            if (e.target.closest(".note-delete-btn")) {
+                deleteNote(note.id);
+                return;
+            }
+            selectNote(note.id);
+        });
+
+        notesListContainer.appendChild(noteItem);
+    });
+}
+
+function renderDatasetsList() {
+    if (!notesListContainer) return;
+    notesListContainer.innerHTML = "";
+
+    (state.datasetsList || []).forEach((dataset) => {
+        const updatedAt = dataset.updatedAt ? new Date(dataset.updatedAt) : null;
+        const dateStr = updatedAt ? updatedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Unknown";
+        const isActive = dataset.id === state.currentDatasetId;
+        const sourceLabel = dataset.source === "autosave" ? "Autosave" : "Dataset";
+
+        const datasetItem = document.createElement("div");
+        datasetItem.className = `note-item ${isActive ? "active" : ""}`;
+        datasetItem.dataset.id = dataset.id;
+
+        datasetItem.innerHTML = `
+            <div class="note-item-info">
+                <span class="note-item-title">${escapeHTML(dataset.title || "Untitled Dataset")}</span>
+                <span class="note-item-date">Updated: ${dateStr} · ${sourceLabel}</span>
+            </div>
+        `;
+
+        datasetItem.addEventListener("click", () => {
+            selectDataset(dataset.id);
+        });
+
+        notesListContainer.appendChild(datasetItem);
+    });
+}
+
+function upsertDatasetListItem(dataset) {
+    if (!dataset || !dataset.id) return;
+    const list = Array.isArray(state.datasetsList) ? state.datasetsList : [];
+    const existing = list.findIndex((item) => item.id === dataset.id);
+    if (existing >= 0) {
+        list[existing] = { ...list[existing], ...dataset };
+    } else {
+        list.unshift(dataset);
+    }
+    state.datasetsList = list;
+    renderDatasetsList();
+}
+
+async function selectDataset(datasetId) {
+    if (state.workspaceMode !== "dataset") return;
+    if (!datasetId) return;
+    if (state.currentDatasetId === datasetId) return;
+
+    setSyncStatus("syncing");
+    try {
+        const response = await fetch(`/api/datasets/${encodeURIComponent(datasetId)}`);
+        if (!response.ok) throw new Error("Failed to fetch dataset");
+        const data = await response.json();
+
+        const datasetInfo = (state.datasetsList || []).find((d) => d.id === datasetId);
+        const datasetTitle = datasetInfo?.title || data?.metadata?.title || "Untitled Dataset";
+        importDataset(data, { datasetId, datasetTitle, source: datasetInfo?.source || "autosave" });
+        setSyncStatus("saved");
+    } catch (err) {
+        console.error("Failed to select dataset:", err);
+        setSyncStatus("offline");
+    }
+}
+
+async function selectNote(noteId) {
+    if (state.workspaceMode !== "notes") return;
+    if (state.currentNoteId === noteId) return;
+
+    if (syncPollInterval) {
+        clearInterval(syncPollInterval);
+        syncPollInterval = null;
+    }
+
+    state.currentNoteId = noteId;
+    state.otherUsersStrokes = {};
+
+    state.strokes = [];
+    state.currentStroke = null;
+    state.drawing = false;
+    if (state.finalizationTimer) {
+        clearTimeout(state.finalizationTimer);
+        state.finalizationTimer = null;
+    }
+
+    renderNotesList();
+    setSyncStatus("syncing");
+
+    try {
+        const response = await fetch(`/api/notes/${noteId}`);
+        if (!response.ok) throw new Error("Failed to fetch note");
+        const note = await response.json();
+
+        state.finalizedLetters = note.finalizedLetters || [];
+        state.finalizedWords = note.finalizedWords || [];
+
+        if (noteTitleInput) {
+            noteTitleInput.value = note.title || "";
+        }
+
+        redraw();
+        updateStats();
+        updateRecognizedWords();
+        setSyncStatus("saved");
+
+        syncPollInterval = setInterval(syncCurrentNote, 300);
+    } catch (err) {
+        console.error("Failed to select note:", err);
+        setSyncStatus("offline");
+    }
+}
+
+async function createNewNote() {
+    if (state.workspaceMode !== "notes") return;
+    try {
+        setSyncStatus("syncing");
+        const response = await fetch("/api/notes", { method: "POST" });
+        if (!response.ok) throw new Error("Failed to create note");
+        const newNote = await response.json();
+
+        state.currentNoteId = null;
+        await loadNotesList();
+        await selectNote(newNote.id);
+    } catch (err) {
+        console.error("Failed to create note:", err);
+        setSyncStatus("offline");
+    }
+}
+
+async function deleteNote(noteId) {
+    if (state.workspaceMode !== "notes") return;
+    if (!confirm("Are you sure you want to delete this note? This action cannot be undone.")) return;
+
+    try {
+        setSyncStatus("syncing");
+        const response = await fetch(`/api/notes/${noteId}`, { method: "DELETE" });
+        if (!response.ok) throw new Error("Failed to delete note");
+
+        if (state.currentNoteId === noteId) {
+            state.currentNoteId = null;
+            if (syncPollInterval) {
+                clearInterval(syncPollInterval);
+                syncPollInterval = null;
+            }
+        }
+        await loadNotesList();
+    } catch (err) {
+        console.error("Failed to delete note:", err);
+        setSyncStatus("offline");
+    }
+}
+
+async function renameNote(noteId, newTitle) {
+    if (state.workspaceMode !== "notes") return;
+    if (!noteId) return;
+    try {
+        setSyncStatus("syncing");
+        const response = await fetch(`/api/notes/${noteId}/rename`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: newTitle }),
+        });
+        if (!response.ok) throw new Error("Failed to rename note");
+
+        const note = state.notesList.find((n) => n.id === noteId);
+        if (note) {
+            note.title = newTitle;
+            renderNotesList();
+        }
+        setSyncStatus("saved");
+    } catch (err) {
+        console.error("Failed to rename note:", err);
+        setSyncStatus("offline");
+    }
+}
+
+async function syncCurrentNote() {
+    if (state.workspaceMode !== "notes" || !state.currentNoteId) return;
+
+    try {
+        const response = await fetch(`/api/notes/${state.currentNoteId}/sync`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                clientSessionId: state.clientSessionId,
+                strokes: state.strokes,
+                currentStroke: state.currentStroke,
+            }),
+        });
+
+        if (!response.ok) throw new Error("Sync failed");
+        const data = await response.json();
+
+        state.otherUsersStrokes = data.activeStrokes || {};
+
+        const lettersChanged = JSON.stringify(state.finalizedLetters) !== JSON.stringify(data.finalizedLetters);
+        const wordsChanged = JSON.stringify(state.finalizedWords) !== JSON.stringify(data.finalizedWords);
+
+        if (lettersChanged || wordsChanged) {
+            state.finalizedLetters = data.finalizedLetters || [];
+            state.finalizedWords = data.finalizedWords || [];
+            redraw();
+            updateStats();
+            updateRecognizedWords();
+        }
+
+        if (noteTitleInput && document.activeElement !== noteTitleInput) {
+            if (noteTitleInput.value !== data.title) {
+                noteTitleInput.value = data.title || "";
+                const note = state.notesList.find((n) => n.id === state.currentNoteId);
+                if (note && note.title !== data.title) {
+                    note.title = data.title;
+                    renderNotesList();
+                }
+            }
+        }
+
+        setSyncStatus("saved");
+    } catch (err) {
+        console.error("Sync error:", err);
+        setSyncStatus("offline");
+    }
+}
+
+// Hook up UI listeners
+if (newNoteBtn) {
+    newNoteBtn.addEventListener("click", () => {
+        if (state.workspaceMode === "dataset") {
+            createNewDataset();
+        } else {
+            createNewNote();
+        }
+    });
+}
+
+if (noteTitleInput) {
+    let renameTimeout = null;
+    noteTitleInput.addEventListener("input", () => {
+        if (state.workspaceMode !== "notes") return;
+        clearTimeout(renameTimeout);
+        renameTimeout = setTimeout(() => {
+            renameNote(state.currentNoteId, noteTitleInput.value);
+        }, 500);
+    });
+    noteTitleInput.addEventListener("blur", () => {
+        if (state.workspaceMode !== "notes") return;
+        clearTimeout(renameTimeout);
+        renameNote(state.currentNoteId, noteTitleInput.value);
+    });
+}
+
 syncSpeed();
 resizeCanvas();
 updateStats();
-loadModel();
-loadDictionary();
-pickNextPracticeWord();
+initializeAutosave();
+setWorkspaceMode("notes", { force: true });
