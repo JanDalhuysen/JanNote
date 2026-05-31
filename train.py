@@ -20,7 +20,15 @@ def load_combined_dataset():
     if not files:
         all_files = glob.glob("*.json")
         files = [
-            f for f in all_files if f not in ["class_names.json", "package.json", "package-lock.json", "sequence_vocab.json"]
+            f
+            for f in all_files
+            if f
+            not in [
+                "class_names.json",
+                "package.json",
+                "package-lock.json",
+                "sequence_vocab.json",
+            ]
         ]
 
     if not files:
@@ -35,10 +43,7 @@ def load_combined_dataset():
             merged["samples"].extend(data.get("samples", []))
             merged["sequenceSamples"].extend(data.get("sequenceSamples", []))
 
-    print(
-        f"Loaded {len(merged['samples'])} char samples and "
-        f"{len(merged['sequenceSamples'])} sequence samples from {len(files)} files."
-    )
+    print(f"Loaded {len(merged['samples'])} char samples and {len(merged['sequenceSamples'])} sequence samples from {len(files)} files.")
     return merged
 
 
@@ -177,9 +182,13 @@ def train_char_model(X, y_labels):
     )
 
     opt = keras.optimizers.Adam(learning_rate=0.001, clipnorm=1.0)
-    model.compile(optimizer=opt, loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    model.compile(
+        optimizer=opt,
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"],
+    )
 
-    epochs = 32 + 32
+    epochs = 32 + 32 + 32 + 32
     batch_size = min(16, len(X))
     model.fit(
         X,
@@ -211,7 +220,11 @@ def build_sequence_models(vocab_size):
 
     ctc_loss = keras.layers.Lambda(ctc_loss_fn, name="ctc_loss")([y_pred, labels, input_len, label_len])
 
-    train_model = keras.Model(inputs=[input_x, labels, input_len, label_len], outputs=ctc_loss, name="ctc_train_model")
+    train_model = keras.Model(
+        inputs=[input_x, labels, input_len, label_len],
+        outputs=ctc_loss,
+        name="ctc_train_model",
+    )
     infer_model = keras.Model(inputs=input_x, outputs=y_pred, name="ctc_infer_model")
     return train_model, infer_model
 
@@ -226,7 +239,10 @@ def train_sequence_model(seq_data):
 
     print(f"Training sequence model with {len(X)} samples, charset={vocab_size}")
     train_model, infer_model = build_sequence_models(vocab_size)
-    train_model.compile(loss={"ctc_loss": lambda _y_true, y_pred: y_pred}, optimizer=keras.optimizers.Adam(0.001))
+    train_model.compile(
+        loss={"ctc_loss": lambda _y_true, y_pred: y_pred},
+        optimizer=keras.optimizers.Adam(0.001),
+    )
 
     dummy_y = np.zeros((len(X), 1), dtype=np.float32)
     train_model.fit(
@@ -240,18 +256,25 @@ def train_sequence_model(seq_data):
 
     infer_model.save("handwriting_sequence_model.keras")
     with open("sequence_vocab.json", "w", encoding="utf-8") as f:
-        json.dump({"chars": charset, "blank": BLANK_TOKEN, "targetLen": SEQ_TARGET_LEN}, f, ensure_ascii=False)
+        json.dump(
+            {
+                "chars": charset,
+                "blank": BLANK_TOKEN,
+                "targetLen": SEQ_TARGET_LEN,
+            },
+            f,
+            ensure_ascii=False,
+        )
     print("Saved handwriting_sequence_model.keras and sequence_vocab.json")
 
 
 def main():
-    print("=== Starting Handwriting Trainer (char + sequence) ===")
+    print("Starting Handwriting Trainer (char + sequence)")
     dataset = load_combined_dataset()
 
     X_char, y_char = preprocess_char_samples(dataset)
     if X_char is not None and len(X_char) > 0:
-        # train_char_model(X_char, y_char)
-        pass
+        train_char_model(X_char, y_char)
     else:
         print("No character samples found. Skipping character model.")
 
@@ -261,7 +284,7 @@ def main():
     else:
         print("No sequenceSamples found. Skipping sequence model.")
 
-    print("=== Training complete ===")
+    print("Training complete")
 
 
 if __name__ == "__main__":

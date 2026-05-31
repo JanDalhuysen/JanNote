@@ -71,20 +71,68 @@ def decode_ctc_with_spans(prob_matrix, idx_to_char):
         if token == prev:
             continue
         if prev != blank_idx and prev in idx_to_char:
-            spans.append({"char": idx_to_char[prev], "startStep": int(run_start), "endStep": int(t - 1)})
+            spans.append(
+                {
+                    "char": idx_to_char[prev],
+                    "startStep": int(run_start),
+                    "endStep": int(t - 1),
+                }
+            )
             decoded_chars.append(idx_to_char[prev])
         run_start = t
         prev = token
 
     if prev != blank_idx and prev in idx_to_char:
-        spans.append({"char": idx_to_char[prev], "startStep": int(run_start), "endStep": int(len(token_ids) - 1)})
+        spans.append(
+            {
+                "char": idx_to_char[prev],
+                "startStep": int(run_start),
+                "endStep": int(len(token_ids) - 1),
+            }
+        )
         decoded_chars.append(idx_to_char[prev])
 
     text = "".join(decoded_chars)
-    conf = (
-        float(np.mean([np.max(prob_matrix[s["startStep"] : s["endStep"] + 1], axis=-1).mean() for s in spans])) if spans else 0.0
-    )
+    conf = float(np.mean([np.max(prob_matrix[s["startStep"] : s["endStep"] + 1], axis=-1).mean() for s in spans])) if spans else 0.0
     return text, conf, spans
+
+
+def split_points_into_segments(seq_points):
+    segments = []
+    current = []
+    for pt in seq_points:
+        current.append(pt)
+        pen_lift = float(pt[2]) if len(pt) >= 3 else 0.0
+        if pen_lift >= 0.9:
+            segments.append(current)
+            current = []
+    if current:
+        segments.append(current)
+    return segments
+
+
+def predict_char_segments(char_model, class_names, seq_points):
+    if char_model is None or not class_names:
+        return "", 0.0, 0
+
+    segments = split_points_into_segments(seq_points)
+    if not segments:
+        return "", 0.0, 0
+
+    chars = []
+    confidences = []
+    for segment in segments:
+        x_single, _ = preprocess_sequence(segment, CHAR_TARGET_LEN)
+        X = np.expand_dims(x_single, axis=0)
+        preds = char_model.predict(X, verbose=0)
+        pred_idx = int(np.argmax(preds[0]))
+        confidence = float(preds[0][pred_idx])
+        chars.append(class_names[pred_idx])
+        confidences.append(confidence)
+
+    text = "".join(chars)
+    avg_conf = float(np.mean(confidences)) if confidences else 0.0
+    return text, avg_conf, len(segments)
 
 
 def main():
@@ -142,7 +190,10 @@ def main():
 
             if mode == "sequence":
                 if seq_model is None or not seq_vocab:
-                    print(json.dumps({"error": "Sequence model not trained yet. Run train.py with sequenceSamples."}), flush=True)
+                    print(
+                        json.dumps({"error": "Sequence model not trained yet. Run train.py with sequenceSamples."}),
+                        flush=True,
+                    )
                     continue
 
                 x_single, used_len = preprocess_sequence(raw_points, SEQ_TARGET_LEN)
@@ -162,8 +213,87 @@ def main():
                 print(json.dumps(resp, ensure_ascii=False), flush=True)
                 continue
 
+            if mode == "hybrid":
+                sequence_text = ""
+                sequence_conf = 0.0
+                spans = []
+                used_len = 0
+
+                if seq_model is not None and seq_vocab:
+                    x_single, used_len = preprocess_sequence(raw_points, SEQ_TARGET_LEN)
+                    X = np.expand_dims(x_single, axis=0)
+                    probs = seq_model.predict(X, verbose=0)[0]
+                    chars = seq_vocab.get("chars", [])
+                    idx_to_char = {i: ch for i, ch in enumerate(chars)}
+                    sequence_text, sequence_conf, spans = decode_ctc_with_spans(probs, idx_to_char)
+
+                char_text = ""
+                char_conf = 0.0
+                segment_count = 0
+                if char_model is not None and class_names:
+                    char_text, char_conf, segment_count = predict_char_segments(char_model, class_names, raw_points)
+
+                if not sequence_text and not char_text:
+                    print(
+                        json.dumps({"error": "No prediction available."}),
+                        flush=True,
+                    )
+                    continue
+
+                decision = "sequence"
+                chosen_text = sequence_text or char_text
+                chosen_conf = sequence_conf if sequence_text else char_conf
+                char_used = True
+                char_reason = ""
+
+                if sequence_text and char_text:
+                    if sequence_conf >= char_conf * 0.9:
+                        decision = "sequence"
+                        chosen_text = sequence_text
+                        chosen_conf = sequence_conf
+                        char_used = False
+                        char_reason = "sequence-preferred"
+                    else:
+                        decision = "char"
+                        chosen_text = char_text
+                        chosen_conf = char_conf
+                        char_used = True
+                elif sequence_text:
+                    decision = "sequence"
+                    chosen_text = sequence_text
+                    chosen_conf = sequence_conf
+                    char_used = False
+                    char_reason = "char-unavailable"
+                else:
+                    decision = "char"
+                    chosen_text = char_text
+                    chosen_conf = char_conf
+                    char_used = True
+
+                resp = {
+                    "prediction": chosen_text or "?",
+                    "confidence": chosen_conf,
+                    "mode": "hybrid",
+                    "sequencePrediction": sequence_text or "?",
+                    "sequenceConfidence": sequence_conf,
+                    "charPrediction": char_text or "?",
+                    "charConfidence": char_conf,
+                    "charUsed": char_used,
+                    "charIgnoredReason": char_reason,
+                    "decision": decision,
+                    "letterSpans": spans,
+                    "usedTimesteps": int(used_len),
+                    "segmentCount": int(segment_count),
+                    "expectedCharCount": int(len(char_text)) if char_text else 0,
+                }
+                print(json.dumps(resp, ensure_ascii=False), flush=True)
+                continue
+
             if char_model is None or not class_names:
-                print(json.dumps({"error": "Character model not trained yet. Run train.py first."}), flush=True)
+                print(
+                    json.dumps({"error": "Character model not trained yet. Run train.py first."}),
+                    flush=True,
+                )
                 continue
 
             x_single, _ = preprocess_sequence(raw_points, CHAR_TARGET_LEN)
@@ -173,7 +303,14 @@ def main():
             confidence = float(preds[0][pred_idx])
             predicted_char = class_names[pred_idx]
             print(
-                json.dumps({"prediction": predicted_char, "confidence": confidence, "mode": "char"}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "prediction": predicted_char,
+                        "confidence": confidence,
+                        "mode": "char",
+                    },
+                    ensure_ascii=False,
+                ),
                 flush=True,
             )
         except Exception as e:

@@ -597,6 +597,34 @@ body.mode-label #inkCanvas {
     transform: scale(1);
 }
 
+/* Writing style toggle (Predict mode) */
+.style-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 0.75rem;
+    background: rgba(7, 12, 24, 0.45);
+    border: 1px solid var(--border);
+}
+
+.style-label {
+    font-size: 0.78rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+}
+
+.style-toggle .mode-toggle {
+    padding: 0.15rem;
+}
+
+.style-toggle .mode-btn {
+    padding: 0.35rem 0.75rem;
+    font-size: 0.75rem;
+}
+
 /* Prediction Stat Card */
 .prediction-stat {
     background: rgba(56, 189, 248, 0.04) !important;

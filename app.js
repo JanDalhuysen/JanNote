@@ -20,6 +20,7 @@ const elapsedValue = document.getElementById("elapsedValue");
 
 // Mode & Label UI Elements
 const notesModeBtn = document.getElementById("notesModeBtn");
+const predictModeBtn = document.getElementById("predictModeBtn");
 const datasetModeBtn = document.getElementById("datasetModeBtn");
 const datasetSubModeToggle = document.getElementById("datasetSubModeToggle");
 const datasetSubModeDivider = document.getElementById("datasetSubModeDivider");
@@ -50,6 +51,8 @@ const predictionText = document.getElementById("predictionText");
 const predictionConfidenceText = document.getElementById("predictionConfidenceText");
 const predictionConfidenceBar = document.getElementById("predictionConfidenceBar");
 const predictionBadge = document.getElementById("predictionBadge");
+const predictStyleToggle = document.getElementById("predictStyleToggle");
+const predictStyleButtons = document.querySelectorAll(".style-btn");
 
 // Note Management UI Elements
 const noteTitleInput = document.getElementById("noteTitleInput");
@@ -73,13 +76,14 @@ const state = {
     durationMs: 0,
     pointerId: null,
     speed: 1,
-    workspaceMode: "notes", // "notes" or "dataset"
+    workspaceMode: "notes", // "notes" | "predict" | "dataset"
     mode: "draw", // "draw" or "label"
     activeLabel: "a",
     model: null,
     classNames: [],
     predictMode: true,
     continuousMode: false,
+    writingStyle: "print", // "print" | "cursive" | "mixed"
     finalizedLetters: [],
     finalizedWords: [],
     finalizationTimer: null,
@@ -184,6 +188,14 @@ function pickRareWord() {
 
     const pool = candidateObjects.map((item) => item.word);
     return pickRandomDifferent(pool, state.practiceWord);
+}
+
+function isPredictionWorkspace() {
+    return state.workspaceMode === "dataset" || state.workspaceMode === "predict";
+}
+
+function isNoteWorkspace() {
+    return state.workspaceMode === "notes" || state.workspaceMode === "predict";
 }
 
 function getAllStrokes() {
@@ -661,6 +673,50 @@ function setContinuousMode(enabled) {
     }
 }
 
+function syncPredictControlsVisibility() {
+    const isPredict = state.workspaceMode === "predict";
+    if (predictStyleToggle) {
+        predictStyleToggle.classList.toggle("hidden", !isPredict);
+    }
+
+    const continuousToggle = continuousModeCheckbox ? continuousModeCheckbox.closest("label") : null;
+    const showContinuousToggle = state.workspaceMode === "dataset" || (isPredict && state.writingStyle === "mixed");
+    if (continuousToggle) {
+        continuousToggle.classList.toggle("hidden", !showContinuousToggle);
+    }
+
+    if (commitWordBtn) {
+        const showCommit = state.workspaceMode === "dataset" || (isPredict && state.writingStyle !== "print");
+        commitWordBtn.classList.toggle("hidden", !showCommit);
+    }
+}
+
+function setWritingStyle(style, { applyDefaults = true } = {}) {
+    if (!style) return;
+    const normalized = String(style).toLowerCase();
+    if (!"print|cursive|mixed".includes(normalized)) return;
+
+    state.writingStyle = normalized;
+    predictStyleButtons.forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.style === normalized);
+    });
+
+    if (applyDefaults) {
+        if (normalized === "print") {
+            setContinuousMode(false);
+            setStatus("Print mode: auto-finalize each character.");
+        } else if (normalized === "cursive") {
+            setContinuousMode(true);
+            setStatus("Cursive mode: write connected text, then click Commit Word.");
+        } else {
+            setContinuousMode(false);
+            setStatus("Mixed mode: write print or toggle Continuous Script for cursive.");
+        }
+    }
+
+    syncPredictControlsVisibility();
+}
+
 function pickNextPracticeWord() {
     if (state.workspaceMode !== "dataset" || !EASY_CONNECTED_WORDS.length) return;
 
@@ -755,6 +811,9 @@ function redraw(activeTime = null) {
             // Draw badge above bounding box
             const b = item.bounds;
             if (b.width > 0 && b.height > 0 && b.minX !== Infinity) {
+                if (!isPredictionWorkspace() && !item.label) {
+                    continue;
+                }
                 // If replaying, only draw badge and bounding box if the whole letter is replayed
                 if (activeTime != null) {
                     const lastStroke = item.strokes[item.strokes.length - 1];
@@ -1052,7 +1111,7 @@ function finishStroke() {
         state.finalizationTimer = setTimeout(finalizeCurrentLetter, delayMs);
     }
 
-    if (!state.predictMode || state.workspaceMode !== "dataset") {
+    if (!state.predictMode || !isPredictionWorkspace()) {
         clearPredictionDisplay();
     }
 }
@@ -1469,7 +1528,12 @@ function setWorkspaceMode(newMode, { force = false } = {}) {
     state.workspaceMode = newMode;
 
     const isDataset = newMode === "dataset";
-    notesModeBtn.classList.toggle("active", !isDataset);
+    const isPredict = newMode === "predict";
+    const isNotes = newMode === "notes";
+    notesModeBtn.classList.toggle("active", isNotes);
+    if (predictModeBtn) {
+        predictModeBtn.classList.toggle("active", isPredict);
+    }
     datasetModeBtn.classList.toggle("active", isDataset);
 
     if (labelPracticeRow) {
@@ -1482,23 +1546,17 @@ function setWorkspaceMode(newMode, { force = false } = {}) {
         datasetSubModeDivider.classList.toggle("hidden", !isDataset);
     }
     if (predictionCard) {
-        predictionCard.classList.toggle("hidden", !isDataset);
+        predictionCard.classList.toggle("hidden", !(isDataset || isPredict));
     }
     if (recognizedWordsPanel) {
-        recognizedWordsPanel.classList.toggle("hidden", !isDataset);
+        recognizedWordsPanel.classList.toggle("hidden", !(isDataset || isPredict));
     }
 
     const predictToggle = predictCheckbox ? predictCheckbox.closest("label") : null;
     if (predictToggle) {
-        predictToggle.classList.toggle("hidden", !isDataset);
+        predictToggle.classList.toggle("hidden", !(isDataset || isPredict));
     }
-    const continuousToggle = continuousModeCheckbox ? continuousModeCheckbox.closest("label") : null;
-    if (continuousToggle) {
-        continuousToggle.classList.toggle("hidden", !isDataset);
-    }
-    if (commitWordBtn) {
-        commitWordBtn.classList.toggle("hidden", !isDataset);
-    }
+    syncPredictControlsVisibility();
     if (nextPracticeWordBtn) {
         nextPracticeWordBtn.classList.toggle("hidden", !isDataset);
     }
@@ -1521,10 +1579,17 @@ function setWorkspaceMode(newMode, { force = false } = {}) {
     }
 
     if (!isDataset) {
-        state.predictMode = false;
-        if (predictCheckbox) predictCheckbox.checked = false;
-        setContinuousMode(false);
-        clearPredictionDisplay();
+        state.predictMode = isPredict;
+        if (predictCheckbox) predictCheckbox.checked = isPredict;
+        if (!isPredict) {
+            setContinuousMode(false);
+            clearPredictionDisplay();
+        } else {
+            setWritingStyle(state.writingStyle, { applyDefaults: true });
+            loadModel();
+            loadDictionary();
+            runInference();
+        }
         if (strokeLabelInput) {
             strokeLabelInput.value = "";
         }
@@ -1914,6 +1979,9 @@ speedRange.addEventListener("input", syncSpeed);
 
 // Mode selectors
 notesModeBtn.addEventListener("click", () => setWorkspaceMode("notes"));
+if (predictModeBtn) {
+    predictModeBtn.addEventListener("click", () => setWorkspaceMode("predict"));
+}
 datasetModeBtn.addEventListener("click", () => setWorkspaceMode("dataset"));
 drawModeBtn.addEventListener("click", () => setMode("draw"));
 labelModeBtn.addEventListener("click", () => setMode("label"));
@@ -1926,6 +1994,12 @@ activeLabelInput.addEventListener("input", () => {
 quickLabelBtns.forEach((btn) => {
     btn.addEventListener("click", () => {
         setActiveLabel(btn.textContent);
+    });
+});
+
+predictStyleButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+        setWritingStyle(btn.dataset.style);
     });
 });
 
@@ -2252,7 +2326,7 @@ async function finalizeCurrentWord() {
     updateRecognizedWords();
     pickNextPracticeWord();
 
-    if (!state.predictMode || state.workspaceMode !== "dataset") {
+    if (!state.predictMode || !isPredictionWorkspace()) {
         return;
     }
 
@@ -2270,7 +2344,9 @@ async function finalizeCurrentWord() {
 
         if (seqPoints.length === 0) return;
 
-        const response = await fetch("/predict-hybrid", {
+        const predictEndpoint =
+            state.workspaceMode === "predict" && state.writingStyle === "cursive" ? "/predict-sequence" : "/predict-hybrid";
+        const response = await fetch(predictEndpoint, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -2286,8 +2362,8 @@ async function finalizeCurrentWord() {
         newWord.confidence = data.confidence || 0;
         newWord.letterSpans = Array.isArray(data.letterSpans) ? data.letterSpans : [];
         newWord.usedTimesteps = data.usedTimesteps || 0;
-        newWord.sequencePrediction = data.sequencePrediction || "?";
-        newWord.sequenceConfidence = data.sequenceConfidence || 0;
+        newWord.sequencePrediction = data.sequencePrediction || data.prediction || "?";
+        newWord.sequenceConfidence = data.sequenceConfidence || data.confidence || 0;
         newWord.charPrediction = data.charPrediction || "?";
         newWord.charConfidence = data.charConfidence || 0;
         newWord.charUsed = data.charUsed !== false;
@@ -2386,7 +2462,7 @@ async function finalizeCurrentLetter() {
     redraw();
     updateRecognizedWords();
 
-    if (!state.predictMode || state.workspaceMode !== "dataset") {
+    if (!state.predictMode || !isPredictionWorkspace()) {
         return;
     }
 
@@ -2470,7 +2546,7 @@ async function finalizeCurrentLetter() {
 }
 
 async function runInference() {
-    if (state.workspaceMode !== "dataset") {
+    if (!isPredictionWorkspace()) {
         clearPredictionDisplay();
         return;
     }
@@ -2581,7 +2657,7 @@ async function loadModel() {
 
 if (predictCheckbox) {
     predictCheckbox.addEventListener("change", () => {
-        if (state.workspaceMode !== "dataset") {
+        if (!isPredictionWorkspace()) {
             predictCheckbox.checked = false;
             state.predictMode = false;
             clearPredictionDisplay();
@@ -2598,7 +2674,7 @@ if (predictCheckbox) {
 
 if (continuousModeCheckbox) {
     continuousModeCheckbox.addEventListener("change", () => {
-        if (state.workspaceMode !== "dataset") {
+        if (!isPredictionWorkspace()) {
             continuousModeCheckbox.checked = false;
             state.continuousMode = false;
             return;
@@ -2639,7 +2715,7 @@ function setSyncStatus(status) {
 }
 
 async function loadNotesList() {
-    if (state.workspaceMode !== "notes") return;
+    if (!isNoteWorkspace()) return;
     try {
         const response = await fetch("/api/notes");
         if (!response.ok) throw new Error("Failed to fetch notes list");
@@ -2787,7 +2863,7 @@ async function selectDataset(datasetId) {
 }
 
 async function selectNote(noteId) {
-    if (state.workspaceMode !== "notes") return;
+    if (!isNoteWorkspace()) return;
     if (state.currentNoteId === noteId) return;
 
     if (syncPollInterval) {
@@ -2834,7 +2910,7 @@ async function selectNote(noteId) {
 }
 
 async function createNewNote() {
-    if (state.workspaceMode !== "notes") return;
+    if (!isNoteWorkspace()) return;
     try {
         setSyncStatus("syncing");
         const response = await fetch("/api/notes", { method: "POST" });
@@ -2851,7 +2927,7 @@ async function createNewNote() {
 }
 
 async function deleteNote(noteId) {
-    if (state.workspaceMode !== "notes") return;
+    if (!isNoteWorkspace()) return;
     if (!confirm("Are you sure you want to delete this note? This action cannot be undone.")) return;
 
     try {
@@ -2874,7 +2950,7 @@ async function deleteNote(noteId) {
 }
 
 async function renameNote(noteId, newTitle) {
-    if (state.workspaceMode !== "notes") return;
+    if (!isNoteWorkspace()) return;
     if (!noteId) return;
     try {
         setSyncStatus("syncing");
@@ -2898,7 +2974,7 @@ async function renameNote(noteId, newTitle) {
 }
 
 async function syncCurrentNote() {
-    if (state.workspaceMode !== "notes" || !state.currentNoteId) return;
+    if (!isNoteWorkspace() || !state.currentNoteId) return;
 
     try {
         const response = await fetch(`/api/notes/${state.currentNoteId}/sync`, {
@@ -2959,14 +3035,14 @@ if (newNoteBtn) {
 if (noteTitleInput) {
     let renameTimeout = null;
     noteTitleInput.addEventListener("input", () => {
-        if (state.workspaceMode !== "notes") return;
+        if (!isNoteWorkspace()) return;
         clearTimeout(renameTimeout);
         renameTimeout = setTimeout(() => {
             renameNote(state.currentNoteId, noteTitleInput.value);
         }, 500);
     });
     noteTitleInput.addEventListener("blur", () => {
-        if (state.workspaceMode !== "notes") return;
+        if (!isNoteWorkspace()) return;
         clearTimeout(renameTimeout);
         renameNote(state.currentNoteId, noteTitleInput.value);
     });

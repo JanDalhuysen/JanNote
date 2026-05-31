@@ -101,6 +101,7 @@
                     <div class="toolbar">
                         <div class="mode-toggle">
                             <button id="notesModeBtn" class="mode-btn active">Notes Mode</button>
+                            <button id="predictModeBtn" class="mode-btn">Predict Mode</button>
                             <button id="datasetModeBtn" class="mode-btn">Dataset Mode</button>
                         </div>
 
@@ -138,6 +139,15 @@
                             </label>
 
                             <button id="commitWordBtn" class="secondary">Commit Word</button>
+
+                            <div id="predictStyleToggle" class="style-toggle hidden">
+                                <span class="style-label">Writing style</span>
+                                <div class="mode-toggle">
+                                    <button class="mode-btn style-btn active" data-style="print" type="button">Print</button>
+                                    <button class="mode-btn style-btn" data-style="cursive" type="button">Cursive</button>
+                                    <button class="mode-btn style-btn" data-style="mixed" type="button">Mixed</button>
+                                </div>
+                            </div>
                         </div>
 
                         <!-- Label Mode Controls -->
