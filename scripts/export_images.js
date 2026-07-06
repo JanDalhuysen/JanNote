@@ -46,7 +46,8 @@ function getSafeFolderName(label) {
     return label.replace(/[^a-zA-Z0-9]/g, "_");
 }
 
-function generateSvg(strokes) {
+function generateSvg(strokes, isOutlier = false) {
+    const strokeColor = isOutlier ? "#ef4444" : "#38bdf8";
     // Generate paths for each stroke
     let pathsHtml = "";
 
@@ -67,18 +68,16 @@ function generateSvg(strokes) {
         // If there's only 1 point, draw a small circle instead of a path line
         if (points.length === 1) {
             const pt = points[0];
-            pathsHtml += `  <circle cx="${pt.x.toFixed(2)}" cy="${pt.y.toFixed(2)}" r="3" fill="#38bdf8" />\n`;
+            pathsHtml += `  <circle cx="${pt.x.toFixed(2)}" cy="${pt.y.toFixed(2)}" r="3" fill="${strokeColor}" />\n`;
         } else {
-            pathsHtml += `  <path d="${pathData}" stroke="#38bdf8" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round" />\n`;
+            pathsHtml += `  <path d="${pathData}" stroke="${strokeColor}" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round" />\n`;
         }
     }
 
-    //     return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" style="background-color: #0f172a; border-radius: 8px;">
-    //   <!-- Inner boundary showing the 256x256 limits -->
-    //   <rect x="0" y="0" width="256" height="256" stroke="#1e293b" stroke-width="2" fill="none" />
-    // ${pathsHtml}</svg>`;
-
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="1000" height="1000" style="background-color: #0f172a; border-radius: 8px;">${pathsHtml}</svg>`;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" style="background-color: #0f172a; border-radius: 8px;">
+      <!-- Inner boundary showing the 256x256 limits -->
+      <rect x="0" y="0" width="256" height="256" stroke="#1e293b" stroke-width="2" fill="none" />
+    ${pathsHtml}</svg>`;
 }
 
 function generatePng(svgContent) {
@@ -103,8 +102,20 @@ function generatePng(svgContent) {
 function main() {
     console.log("=== Handwriting Dataset Image Exporter ===");
 
-    const workspaceDir = __dirname;
+    const workspaceDir = path.join(__dirname, "..", "data");
     const debugDir = path.join(workspaceDir, "debug");
+
+    let outliers = new Set();
+    const outliersPath = path.join(__dirname, "outliers.json");
+    if (fs.existsSync(outliersPath)) {
+        try {
+            const outData = JSON.parse(fs.readFileSync(outliersPath, "utf8"));
+            outData.forEach((o) => outliers.add(o.id));
+            console.log(`Loaded ${outliers.size} outliers to highlight.`);
+        } catch (e) {
+            console.error("Could not load outliers.json:", e.message);
+        }
+    }
 
     // Find all dataset files
     const files = fs.readdirSync(workspaceDir).filter((file) => {
@@ -113,6 +124,7 @@ function main() {
 
     if (files.length === 0) {
         console.log("No files matching 'handwriting_dataset_*.json' were found in the current directory.");
+        console.log("Directory check: ", workspaceDir);
         return;
     }
 
@@ -177,25 +189,38 @@ function main() {
                 fs.mkdirSync(labelDir, { recursive: true });
             }
 
-            const svgContent = generateSvg(strokes);
+            const isOutlier = outliers.has(sampleId);
+            const svgContent = generateSvg(strokes, isOutlier);
             const outputFileName = `${fileBasename}_${sampleId}.svg`;
             const outputPath = path.join(labelDir, outputFileName);
 
-            // fs.writeFileSync(outputPath, svgContent, "utf8");
+            fs.writeFileSync(outputPath, svgContent, "utf8");
             totalExported++;
 
+            const outlierDir = path.join(debugDir, "outliers");
+            if (isOutlier) {
+                if (!fs.existsSync(outlierDir)) {
+                    fs.mkdirSync(outlierDir, { recursive: true });
+                }
+                fs.writeFileSync(path.join(outlierDir, `${label}_${outputFileName}`), svgContent, "utf8");
+            }
+
             // Also export png of each svg using sharp
-            // generatePng(svgContent)
-            //     .then((pngBuffer) => {
-            //         if (pngBuffer) {
-            //             const pngFileName = `${fileBasename}_${sampleId}.png`;
-            //             const pngOutputPath = path.join(labelDir, pngFileName);
-            //             // fs.writeFileSync(pngOutputPath, pngBuffer);
-            //         }
-            //     })
-            //     .catch((err) => {
-            //         console.error(`Error generating PNG for ${outputFileName}:`, err);
-            //     });
+            generatePng(svgContent)
+                .then((pngBuffer) => {
+                    if (pngBuffer) {
+                        const pngFileName = `${fileBasename}_${sampleId}.png`;
+                        const pngOutputPath = path.join(labelDir, pngFileName);
+                        fs.writeFileSync(pngOutputPath, pngBuffer);
+
+                        if (isOutlier) {
+                            fs.writeFileSync(path.join(outlierDir, `${label}_${pngFileName}`), pngBuffer);
+                        }
+                    }
+                })
+                .catch((err) => {
+                    console.error(`Error generating PNG for ${outputFileName}:`, err);
+                });
         }
 
         // {
@@ -236,34 +261,33 @@ function main() {
                     strokes = normalizeRawStrokes(strokes);
                 }
 
-                // const folderName = getSafeFolderName(label);
-                // const labelDir = path.join(debugDir, folderName);
+                const folderName = getSafeFolderName(label);
                 // put all the words in the debug folder called words
-                const labelDir = path.join(debugDir, "words");
+                const wordDir = path.join(debugDir, "words");
 
-                if (!fs.existsSync(labelDir)) {
-                    fs.mkdirSync(labelDir, { recursive: true });
+                if (!fs.existsSync(wordDir)) {
+                    fs.mkdirSync(wordDir, { recursive: true });
                 }
 
                 const svgContent = generateSvg(strokes);
                 const outputFileName = `${fileBasename}_${sampleId}.svg`;
-                const outputPath = path.join(labelDir, outputFileName);
+                const outputPath = path.join(wordDir, outputFileName);
 
-                // fs.writeFileSync(outputPath, svgContent, "utf8");
+                fs.writeFileSync(outputPath, svgContent, "utf8");
                 totalExported++;
 
                 // Also export png of each svg using sharp
-                // generatePng(svgContent)
-                //     .then((pngBuffer) => {
-                //         if (pngBuffer) {
-                //             const pngFileName = `${fileBasename}_${sampleId}.png`;
-                //             const pngOutputPath = path.join(labelDir, pngFileName);
-                //             fs.writeFileSync(pngOutputPath, pngBuffer);
-                //         }
-                //     })
-                //     .catch((err) => {
-                //         console.error(`Error generating PNG for ${outputFileName}:`, err);
-                //     });
+                generatePng(svgContent)
+                    .then((pngBuffer) => {
+                        if (pngBuffer) {
+                            const pngFileName = `${fileBasename}_${sampleId}.png`;
+                            const pngOutputPath = path.join(wordDir, pngFileName);
+                            fs.writeFileSync(pngOutputPath, pngBuffer);
+                        }
+                    })
+                    .catch((err) => {
+                        console.error(`Error generating PNG for ${outputFileName}:`, err);
+                    });
             }
         }
 
