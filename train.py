@@ -190,13 +190,33 @@ def train_char_model(X, y_labels):
 
     epochs = 32 + 32 + 32 + 32
     batch_size = min(16, len(X))
+    use_validation = len(X) >= 10
+    callbacks = []
+    if use_validation:
+        callbacks.append(
+            keras.callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=8,
+                min_delta=0.001,
+                restore_best_weights=True,
+            )
+        )
+        callbacks.append(
+            keras.callbacks.ModelCheckpoint(
+                filepath="handwriting_model.best.keras",
+                monitor="val_loss",
+                save_best_only=True,
+            )
+        )
+
     model.fit(
         X,
         y,
         epochs=epochs,
         batch_size=batch_size,
-        validation_split=0.15 if len(X) >= 10 else 0.0,
+        validation_split=0.15 if use_validation else 0.0,
         verbose=1,
+        callbacks=callbacks,
     )
 
     model.save("handwriting_model.keras")
@@ -245,13 +265,33 @@ def train_sequence_model(seq_data):
     )
 
     dummy_y = np.zeros((len(X), 1), dtype=np.float32)
+    use_validation = len(X) >= 10
+    callbacks = []
+    if use_validation:
+        callbacks.append(
+            keras.callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=10,
+                min_delta=0.001,
+                restore_best_weights=True,
+            )
+        )
+        callbacks.append(
+            keras.callbacks.ModelCheckpoint(
+                filepath="handwriting_sequence_train.best.keras",
+                monitor="val_loss",
+                save_best_only=True,
+            )
+        )
+
     train_model.fit(
         [X, labels, input_lengths, label_lengths],
         dummy_y,
         batch_size=min(8, len(X)),
         epochs=32 + 32 + 32 + 32,
-        validation_split=0.1 if len(X) >= 10 else 0.0,
+        validation_split=0.1 if use_validation else 0.0,
         verbose=1,
+        callbacks=callbacks,
     )
 
     infer_model.save("handwriting_sequence_model.keras")
