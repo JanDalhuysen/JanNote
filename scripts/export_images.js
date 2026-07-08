@@ -105,13 +105,20 @@ function main() {
     const workspaceDir = path.join(__dirname, "..", "data");
     const debugDir = path.join(workspaceDir, "debug");
 
-    let outliers = new Set();
+    const outlierIds = new Set();
+    const outlierSampleKeys = new Set();
     const outliersPath = path.join(__dirname, "outliers.json");
     if (fs.existsSync(outliersPath)) {
         try {
             const outData = JSON.parse(fs.readFileSync(outliersPath, "utf8"));
-            outData.forEach((o) => outliers.add(o.id));
-            console.log(`Loaded ${outliers.size} outliers to highlight.`);
+            outData.forEach((o) => {
+                if (o?.sampleKey) {
+                    outlierSampleKeys.add(o.sampleKey);
+                } else if (o?.id) {
+                    outlierIds.add(o.id);
+                }
+            });
+            console.log(`Loaded ${outlierSampleKeys.size + outlierIds.size} outliers to highlight.`);
         } catch (e) {
             console.error("Could not load outliers.json:", e.message);
         }
@@ -163,6 +170,7 @@ function main() {
         for (const sample of samples) {
             const label = sample.label;
             const sampleId = sample.id || `sample_${Date.now()}`;
+            const sampleKey = `${file}::${sampleId}`;
 
             // Choose either normalizedStrokes or fall back to rawStrokes
             let strokes = sample.normalizedStrokes;
@@ -189,7 +197,7 @@ function main() {
                 fs.mkdirSync(labelDir, { recursive: true });
             }
 
-            const isOutlier = outliers.has(sampleId);
+            const isOutlier = outlierSampleKeys.has(sampleKey) || outlierIds.has(sampleId);
             const svgContent = generateSvg(strokes, isOutlier);
             const outputFileName = `${fileBasename}_${sampleId}.svg`;
             const outputPath = path.join(labelDir, outputFileName);

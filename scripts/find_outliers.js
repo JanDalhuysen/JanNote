@@ -3,10 +3,34 @@ const path = require("path");
 
 const dataDir = path.join(__dirname, "..", "data");
 const shouldDelete = process.argv.includes("--delete");
+const DATASET_FILE_PREFIX = "handwriting_dataset_";
 
 // Calculate distance between two points
 function distance(p1, p2) {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+}
+
+function getSampleKey(file, sampleId) {
+    return `${file}::${sampleId}`;
+}
+
+function createBackupRunDirectory() {
+    const runId = new Date().toISOString().replace(/[:.]/g, "-");
+    return path.join(dataDir, "_outlier_backups", runId);
+}
+
+function backupDatasetFile(filePath, backupDir) {
+    if (!fs.existsSync(backupDir)) {
+        fs.mkdirSync(backupDir, { recursive: true });
+    }
+
+    const backupPath = path.join(backupDir, path.basename(filePath));
+    if (fs.existsSync(backupPath)) {
+        throw new Error(`Backup already exists at ${backupPath}`);
+    }
+
+    fs.copyFileSync(filePath, backupPath);
+    return backupPath;
 }
 
 // Extract features from a sample
@@ -17,21 +41,27 @@ function extractFeatures(sample) {
         maxY = -Infinity;
     let totalLength = 0;
 
-    if (!sample.rawStrokes || sample.rawStrokes.length === 0) {
+    if (!Array.isArray(sample.rawStrokes) || sample.rawStrokes.length === 0) {
         return { width: 0, height: 0, totalLength: 0, strokeCount: 0 };
     }
 
     sample.rawStrokes.forEach((stroke) => {
-        const points = stroke.points;
+        const points = Array.isArray(stroke?.points) ? stroke.points : [];
         for (let i = 0; i < points.length; i++) {
             const p = points[i];
+            if (!Number.isFinite(p?.x) || !Number.isFinite(p?.y)) {
+                continue;
+            }
             if (p.x < minX) minX = p.x;
             if (p.x > maxX) maxX = p.x;
             if (p.y < minY) minY = p.y;
             if (p.y > maxY) maxY = p.y;
 
             if (i > 0) {
-                totalLength += distance(points[i - 1], p);
+                const prev = points[i - 1];
+                if (Number.isFinite(prev?.x) && Number.isFinite(prev?.y)) {
+                    totalLength += distance(prev, p);
+                }
             }
         }
     });
@@ -43,7 +73,7 @@ function extractFeatures(sample) {
         width,
         height,
         totalLength,
-        strokeCount: sample.strokeCount || sample.rawStrokes.length,
+        strokeCount: typeof sample.strokeCount === "number" ? sample.strokeCount : sample.rawStrokes.length,
     };
 }
 
@@ -63,9 +93,9 @@ function analyze() {
         return;
     }
 
-    const files = fs.readdirSync(dataDir).filter((f) => f.endsWith(".json"));
+    const files = fs.readdirSync(dataDir).filter((f) => f.startsWith(DATASET_FILE_PREFIX) && f.endsWith(".json"));
 
-    const statsByLabel = {};
+    const statsByLabel = Object.create(null);
     const allSamples = [];
 
     console.log(`Reading ${files.length} dataset files...`);
@@ -77,6 +107,10 @@ function analyze() {
 
             if (data.samples) {
                 data.samples.forEach((sample) => {
+                    if (!sample?.id || !sample?.label) {
+                        return;
+                    }
+
                     const label = sample.label;
                     if (!statsByLabel[label]) {
                         statsByLabel[label] = {
@@ -86,7 +120,13 @@ function analyze() {
                     }
 
                     const features = extractFeatures(sample);
-                    const sampleData = { id: sample.id, file, label, features };
+                    const sampleData = {
+                        id: sample.id,
+                        sampleKey: getSampleKey(file, sample.id),
+                        file,
+                        label,
+                        features,
+                    };
 
                     statsByLabel[label].samples.push(sampleData);
                     allSamples.push(sampleData);
@@ -108,7 +148,8 @@ function analyze() {
 
     // Z-score threshold. Adjust this if you get too many or too few results.
     // 3.0 is a typical value for detecting extreme outliers in a normal distribution.
-    const Z_THRESHOLD = 3.0;
+    // const Z_THRESHOLD = 3.0;
+    const Z_THRESHOLD = 2.5;
 
     for (const label in statsByLabel) {
         const group = statsByLabel[label];
@@ -133,6 +174,7 @@ function analyze() {
             if (reasons.length > 0) {
                 badSamples.push({
                     id: sample.id,
+                    sampleKey: sample.sampleKey,
                     label: sample.label,
                     file: sample.file,
                     reasons: reasons,
@@ -144,8 +186,16 @@ function analyze() {
 
     console.log(`Found ${badSamples.length} potential low-quality or bad samples.`);
 
-    // Sort primarily by label, then by file
-    badSamples.sort((a, b) => a.label.localeCompare(b.label));
+    // Sort primarily by label, then by file, then by id
+    badSamples.sort((a, b) => {
+        const labelCompare = a.label.localeCompare(b.label);
+        if (labelCompare !== 0) return labelCompare;
+
+        const fileCompare = a.file.localeCompare(b.file);
+        if (fileCompare !== 0) return fileCompare;
+
+        return String(a.id).localeCompare(String(b.id));
+    });
 
     // Output to a JSON file to review
     const outputPath = path.join(__dirname, "outliers.json");
@@ -166,37 +216,76 @@ function analyze() {
     if (shouldDelete && badSamples.length > 0) {
         console.log(`\nDeleting ${badSamples.length} outliers from dataset files...`);
         const badSamplesByFile = {};
+        const backupDir = createBackupRunDirectory();
         badSamples.forEach((b) => {
             if (!badSamplesByFile[b.file]) badSamplesByFile[b.file] = new Set();
             badSamplesByFile[b.file].add(b.id);
         });
 
         let deletedCount = 0;
+        let backedUpFiles = 0;
         for (const [file, idsToDelete] of Object.entries(badSamplesByFile)) {
             const filePath = path.join(dataDir, file);
             try {
                 const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
                 if (data.samples) {
                     const originalLength = data.samples.length;
-                    data.samples = data.samples.filter((s) => !idsToDelete.has(s.id));
+                    const filteredSamples = data.samples.filter((s) => !idsToDelete.has(s.id));
+                    const removedCount = originalLength - filteredSamples.length;
+
+                    if (removedCount === 0) {
+                        continue;
+                    }
+
+                    const backupPath = backupDatasetFile(filePath, backupDir);
+                    backedUpFiles++;
+                    data.samples = filteredSamples;
 
                     if (data.metadata) {
                         data.metadata.totalSamples = data.samples.length;
+                        data.metadata.totalSequenceSamples = Array.isArray(data.sequenceSamples)
+                            ? data.sequenceSamples.length
+                            : 0;
+
                         let totalStrokes = 0;
-                        data.samples.forEach((s) => {
-                            if (s.rawStrokes) totalStrokes += s.rawStrokes.length;
-                        });
+                        let totalLabeledStrokes = 0;
+
+                        if (Array.isArray(data.samples)) {
+                            data.samples.forEach((s) => {
+                                const count =
+                                    typeof s.strokeCount === "number" ? s.strokeCount : s.rawStrokes ? s.rawStrokes.length : 0;
+                                totalStrokes += count;
+                                if (s.label) {
+                                    totalLabeledStrokes += count;
+                                }
+                            });
+                        }
+                        if (Array.isArray(data.sequenceSamples)) {
+                            data.sequenceSamples.forEach((s) => {
+                                const count =
+                                    typeof s.strokeCount === "number" ? s.strokeCount : s.rawStrokes ? s.rawStrokes.length : 0;
+                                totalStrokes += count;
+                                if (s.text) {
+                                    totalLabeledStrokes += count;
+                                }
+                            });
+                        }
+
                         data.metadata.totalStrokes = totalStrokes;
-                        data.metadata.totalLabeledStrokes = totalStrokes;
+                        data.metadata.totalLabeledStrokes = totalLabeledStrokes;
                     }
 
                     fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-                    console.log(`- Removed ${originalLength - data.samples.length} samples from ${file}`);
-                    deletedCount += originalLength - data.samples.length;
+                    console.log(`- Backed up ${file} to ${backupPath}`);
+                    console.log(`- Removed ${removedCount} samples from ${file}`);
+                    deletedCount += removedCount;
                 }
             } catch (e) {
                 console.error(`Error deleting from ${file}: ${e.message}`);
             }
+        }
+        if (backedUpFiles > 0) {
+            console.log(`Backups were written to ${backupDir}`);
         }
         console.log(`Successfully deleted ${deletedCount} samples from datasets.`);
     } else if (!shouldDelete && badSamples.length > 0) {
